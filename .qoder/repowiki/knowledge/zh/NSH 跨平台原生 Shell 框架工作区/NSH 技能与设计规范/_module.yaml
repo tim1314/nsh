@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: skills
+title: NSH 技能与设计规范
+scope:
+    - skills/
+source_files: []
+depends_on: []
+related_to: []

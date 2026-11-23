@@ -1,0 +1,21 @@
+schema_version: 1
+module_path: ""
+title: NSH 跨平台原生 Shell 框架工作区
+scope:
+    - README.md
+    - CONTRIBUTING.md
+    - AGENTS.md
+    - CLAUDE.md
+    - CONTEXT.md
+    - Cargo.toml
+    - Cargo.lock
+    - rust-toolchain.toml
+    - .gitignore
+    - .gitattributes
+    - .cargo/
+    - .github/
+    - .rustfmt.toml
+    - LICENSE-APACHE
+source_files: []
+depends_on: []
+related_to: []

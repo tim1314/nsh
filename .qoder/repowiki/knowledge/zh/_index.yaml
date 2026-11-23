@@ -1,0 +1,75 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: main
+nodes_managed: true
+exported_at: "2026-11-23T07:31:31Z"
+modules:
+    "":
+        dir_name: NSH 跨平台原生 Shell 框架工作区
+        title: NSH 跨平台原生 Shell 框架工作区
+        scope:
+            - README.md
+            - CONTRIBUTING.md
+            - AGENTS.md
+            - CLAUDE.md
+            - CONTEXT.md
+            - Cargo.toml
+            - Cargo.lock
+            - rust-toolchain.toml
+            - .gitignore
+            - .gitattributes
+            - .cargo/
+            - .github/
+            - .rustfmt.toml
+            - LICENSE-APACHE
+        source_files: []
+        children:
+            - docs
+            - examples
+            - skills
+            - website
+        depends_on: []
+        related_to: []
+    docs:
+        dir_name: NSH 项目文档与开发者指南
+        title: NSH 项目文档与开发者指南
+        scope:
+            - docs/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: examples
+            - path: website
+    examples:
+        dir_name: NSH 示例与演示应用集合
+        title: NSH 示例与演示应用集合
+        scope:
+            - examples/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: docs
+            - path: website
+    skills:
+        dir_name: NSH 技能与设计规范
+        title: NSH 技能与设计规范
+        scope:
+            - skills/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    website:
+        dir_name: NSH 官方文档与示例站点（Astro 静态站）
+        title: NSH 官方文档与示例站点（Astro 静态站）
+        scope:
+            - website/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to:
+            - path: docs
+            - path: examples
