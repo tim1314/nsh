@@ -17,6 +17,9 @@ pub struct Environment {
     pub vertical_size_class: Option<crate::platform::SizeClass>,
     /// The edges system UI covers.
     pub safe_area: EdgeInsets,
+    /// The parts of the surface the device reserves
+    /// ([`crate::platform::Environment::reserved_regions`]).
+    pub reserved_regions: crate::platform::ReservedRegions,
     /// Space reserved for system controls in a custom desktop title bar.
     pub title_bar: crate::geometry::Edges<crate::geometry::Points>,
     /// The app's window: its bounds, mode and display (desktops).
@@ -98,9 +101,6 @@ pub struct Environment {
     /// The platform shows file dialogs and opens, reveals and trashes local
     /// paths ([`crate::platform::Environment::file_requests`]).
     pub file_requests: bool,
-    /// The platform recognizes speech
-    /// ([`crate::platform::Environment::speech`]).
-    pub speech: bool,
     /// The platform shows notifications
     /// ([`crate::platform::Environment::notifications`]).
     pub notifications: bool,
@@ -145,6 +145,7 @@ impl Default for Environment {
             horizontal_size_class: None,
             vertical_size_class: None,
             safe_area: EdgeInsets::default(),
+            reserved_regions: crate::platform::ReservedRegions::NONE,
             title_bar: crate::geometry::Edges::default(),
             window_state: None,
             keyboard_height: Points(0.0),
@@ -176,7 +177,6 @@ impl Default for Environment {
             auth_session: false,
             scheme_links: true,
             file_requests: false,
-            speech: false,
             notifications: false,
             audio: false,
             tab_bar: true,

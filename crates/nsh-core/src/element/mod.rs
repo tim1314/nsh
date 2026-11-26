@@ -39,7 +39,7 @@ pub(crate) mod builder;
 pub(crate) mod call;
 mod callback;
 pub(crate) mod class;
-mod component;
+pub(crate) mod component;
 pub mod description;
 pub mod desktop;
 mod element_ref;
@@ -116,7 +116,7 @@ pub(crate) use self::{
     component::{AnyInstance, caught, panic_message},
     task::{
         Action, AfterAnswer, AnswerSlot, AudioAction, ClipboardRead, Executor, FileAnswer,
-        NotificationAction, SpeechAction,
+        NotificationAction,
     },
 };
 pub use self::{
@@ -218,19 +218,20 @@ pub use crate::geometry::{
     relative, rems, size,
 };
 pub use crate::{
-    AccessibilityRole, AccessibilityState, AutoCapitalize, AutoFill, BackdropMaterial, BlendMode,
-    BoxShadow, ColorStop, ContextMenuEvent, Cursor, Dialog, DialogButton, DialogButtonStyle,
-    DialogInput, EdgeInsets, EllipsizeMode, EventKind, EventPayload, FpsMode, Haptic, HapticImpact,
-    HapticNotification, HeaderSystemItem, HeaderTitleAlign, KeyCapture, KeyEvent,
-    KeyboardAppearance, KeyboardDismissMode, KeyboardTaps, KeyboardType, KeyframeAnimation,
-    Keyframes, LayoutAnimation, LayoutCurve, LayoutProperty, LayoutTransition, ListAlignment,
-    ListScrollPosition, ListViewport, MacOsBackdrop, MacOsBackdropBlending, MacOsBackdropMaterial,
-    MacOsBackdropState, Measurement, ModalAnimation, ModalPresentation, MouseButton, MouseEvent,
-    PanActivation, PanDirection, PanEdge, PasteBehavior, PasteEvent, PastedFile, PinchEvent,
-    PinchPhase, PointerEvents, PointerType, PressEvent, ResizeMode, ReturnKeyType, RevealOptions,
-    ScreenAnimation, ScrollAlignment, ScrollEdge, SheetDetent, SnapAlignment, StatusBarConfig,
-    StatusBarSetting, StatusBarStyle, SubmitBehavior, TextShadow, TouchEvent, TransformKind,
-    TransformOrigin, Viewability, WheelDelta, WheelEvent,
+    AccessibilityRole, AccessibilityState, AutoCapitalize, AutoFill, BackPhase, BackProgressEvent,
+    BackdropMaterial, BlendMode, BoxShadow, ColorStop, ContextMenuEvent, Cursor, Dialog,
+    DialogButton, DialogButtonStyle, DialogInput, EdgeInsets, EllipsizeMode, EventKind,
+    EventPayload, FpsMode, Haptic, HapticImpact, HapticNotification, HeaderSystemItem,
+    HeaderTitleAlign, KeyCapture, KeyEvent, KeyboardAppearance, KeyboardDismissMode, KeyboardTaps,
+    KeyboardType, KeyframeAnimation, Keyframes, LayoutAnimation, LayoutCurve, LayoutProperty,
+    LayoutTransition, ListAlignment, ListScrollPosition, ListViewport, MacOsBackdrop,
+    MacOsBackdropBlending, MacOsBackdropMaterial, MacOsBackdropState, Measurement, ModalAnimation,
+    ModalPresentation, MouseButton, MouseEvent, PanActivation, PanDirection, PanEdge,
+    PasteBehavior, PasteEvent, PastedFile, PinchEvent, PinchPhase, PointerEvents, PointerType,
+    PressEvent, ResizeMode, ReturnKeyType, RevealOptions, ScreenAnimation, ScrollAlignment,
+    ScrollEdge, SheetDetent, SnapAlignment, StatusBarConfig, StatusBarSetting, StatusBarStyle,
+    SubmitBehavior, TextShadow, TouchEvent, TransformKind, TransformOrigin, Viewability,
+    WheelDelta, WheelEvent,
     animation::{
         Curve, EaseMode, Easing, Extrapolate, Keyframe, KeyframeTiming, MotionChannel, MotionKind,
         MotionPreset, MotionSpec, Output as AnimationOutput, PlaybackDirection, StaggerFrom,
@@ -245,7 +246,8 @@ pub use crate::{
     platform::{
         Appearance, CellularData, HourCycle, HttpBody, HttpHead, HttpRequest, Idiom, Languages,
         Lifecycle, Locale, LocaleSettings, MeasurementSystem, Network, NetworkKind, Os, PerfStats,
-        SizeClass, TemperatureUnit, TimeZone, Weekday,
+        ReservedRegion, ReservedRegionKind, ReservedRegions, SizeClass, TemperatureUnit, TimeZone,
+        Weekday,
     },
     style::Color,
 };
@@ -254,6 +256,9 @@ pub use crate::{
 #[doc(hidden)]
 pub mod __private {
     pub use serde_json::Map as JsonMap;
+
+    pub use super::component::BY_NAME_MARKER;
+    pub use crate::shader::USE_MARKER as SHADER_USE_MARKER;
 
     /// The type of a props struct's field `I` as its setter takes it (the
     /// value of an `Option`): `#[derive(Props)]` implements it where the

@@ -173,8 +173,6 @@ pub(crate) enum Action {
         Box<crate::canvas::render::RenderRequest>,
         AnswerSlot<Result<Vec<u8>, super::JsError>>,
     ),
-    /// A speech recognition session's request ([`crate::speech`]).
-    Speech(SpeechAction),
     /// A notification's request ([`crate::notifications`]).
     Notification(NotificationAction),
     /// Reads whether the app launches at login (`None`) or turns it on
@@ -301,24 +299,6 @@ pub(crate) enum Action {
     /// the node, with the layout of the last commit; `None`: the pointer
     /// left.
     HoverAt(NodeId, Option<crate::MouseEvent>),
-}
-
-/// What a speech recognition session asks of the core
-/// ([`Action::Speech`]).
-pub(crate) enum SpeechAction {
-    /// Starts session `id`, reporting to `sink`; the session running is
-    /// aborted first.
-    Start {
-        id: u32,
-        request: crate::speech::SpeechRequest,
-        sink: crate::speech::SpeechSink,
-    },
-    /// Stops session `id`: it finishes what it heard, then ends.
-    Stop(u32),
-    /// Ends session `id` at once, without an error.
-    Abort(u32),
-    /// Whether speech can be recognized; the answer resolves the slot.
-    Available(AnswerSlot<bool>),
 }
 
 /// What a sound or a player asks of the core ([`Action::Audio`]).
@@ -549,6 +529,8 @@ pub(crate) struct Executor {
     derived: RefCell<super::animated::Derived>,
     /// The components' listeners of the back button.
     pub(crate) back: Rc<RefCell<super::back::BackListeners>>,
+    /// The components' listeners of the back gesture's steps.
+    pub(crate) back_progress: Rc<RefCell<super::back::BackProgressListeners>>,
     /// The components' listeners of the host's events
     /// ([`super::on_host_event`]).
     pub(crate) host_events: Rc<RefCell<super::host_events::HostListeners>>,
@@ -556,6 +538,9 @@ pub(crate) struct Executor {
     pub(crate) quit: Rc<RefCell<super::quit::QuitListeners>>,
     /// The quit listeners' work still running ([`crate::Core::start_quit`]).
     pub(crate) quitting: Rc<std::cell::Cell<usize>>,
+    /// The JS calls of an `async fn` into Rust still running (a native
+    /// module's or a class's): what they wait on answers from elsewhere.
+    pub(crate) calls: Rc<std::cell::Cell<usize>>,
     /// What hears the user ask to quit ([`super::desktop::on_quit_request`]).
     pub(crate) quit_requests: Rc<RefCell<super::quit::QuitRequestListeners>>,
     /// What hears the OS ask the app to show itself
@@ -577,6 +562,9 @@ pub(crate) struct Executor {
     /// What waits for the app to answer the events emitted before it
     /// ([`super::after_answer`]).
     answers: RefCell<Answers>,
+    /// What waits for the views of the commit being made
+    /// ([`super::after_render`]).
+    rendered: RefCell<Vec<AfterAnswer>>,
     /// The engine's sounds ([`super::audio`]).
     pub(crate) sounds: RefCell<super::audio::Sounds>,
 }
@@ -591,7 +579,8 @@ struct Answers {
     due: Vec<AfterAnswer>,
 }
 
-/// A closure of [`super::after_answer`] and the owner it runs under.
+/// A closure of [`super::after_answer`] or [`super::after_render`] and the
+/// owner it runs under.
 pub(crate) struct AfterAnswer {
     pub(crate) owner: super::Owner,
     pub(crate) f: Box<dyn FnOnce()>,
@@ -852,6 +841,17 @@ impl Executor {
     /// The closures whose events JS has handled, in order.
     pub(crate) fn take_due_answers(&self) -> Vec<AfterAnswer> {
         std::mem::take(&mut self.answers.borrow_mut().due)
+    }
+
+    /// Keeps `f` until the components of the commit being made have
+    /// rendered ([`super::after_render`]).
+    pub(crate) fn after_render(&self, f: AfterAnswer) {
+        self.rendered.borrow_mut().push(f);
+    }
+
+    /// The closures waiting for the commit's views, in order.
+    pub(crate) fn take_rendered(&self) -> Vec<AfterAnswer> {
+        std::mem::take(&mut self.rendered.borrow_mut())
     }
 }
 

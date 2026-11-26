@@ -182,7 +182,7 @@ fn open_sets_the_environment_and_routes_answer_requests() {
     let results = run_file(&run, &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
-    assert_eq!(results.len(), 15);
+    assert_eq!(results.len(), 16);
 }
 
 #[test]
@@ -387,7 +387,25 @@ fn a_press_fails_on_a_view_another_covers() {
     let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
-    assert_eq!(results.len(), 4);
+    assert_eq!(results.len(), 5);
+}
+
+#[test]
+fn a_press_tells_an_overlay_where_it_went_down_outside() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/press-outside");
+    let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn a_press_reaches_a_control_under_a_tab_bar_out_of_sight() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/tab-bar-hit");
+    let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert_eq!(results.len(), 1);
 }
 
 #[test]
@@ -423,6 +441,15 @@ fn a_press_reaches_a_view_across_a_scroll_view_s_fold() {
 }
 
 #[test]
+fn measure_takes_in_the_scrolls_that_keep_a_list_s_rows_in_place() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/scroll-by");
+    let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
+    let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
+    assert!(failed.is_empty(), "{failed:#?}");
+    assert_eq!(results.len(), 1);
+}
+
+#[test]
 fn a_drag_is_a_finger_on_a_phone_and_the_mouse_on_a_desktop_or_the_web() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testing/drag-pointer");
     let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
@@ -455,7 +482,7 @@ fn a_mouse_drag_selects_in_a_selectable_view() {
     let results = run_file(&run, &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
-    assert_eq!(results.len(), 6);
+    assert_eq!(results.len(), 7);
 }
 
 #[test]
@@ -549,7 +576,7 @@ fn a_desktop_app_root_renders_in_the_implicit_first_window() {
     let results = run_file(&test_run(None), &dir.join("App.test.tsx"), &mut |_| {}).unwrap();
     let failed: Vec<_> = results.iter().filter(|r| r.failure.is_some()).collect();
     assert!(failed.is_empty(), "{failed:#?}");
-    assert_eq!(results.len(), 3);
+    assert_eq!(results.len(), 8);
 }
 
 #[test]

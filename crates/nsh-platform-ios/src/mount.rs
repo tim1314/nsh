@@ -760,6 +760,9 @@ pub(crate) struct Mounter {
     hosts: rustc_hash::FxHashMap<NodeId, NodeId>,
     /// Stacks whose screens changed in the current batch.
     dirty_stacks: Vec<NodeId>,
+    /// Views whose transform went back to the identity: the stacks inside
+    /// them are laid out again ([`Mounter::lay_out_untransformed`]).
+    untransformed: Vec<NodeId>,
     /// A retained tab changed visibility; sync the newly visible stack.
     bottom_bar_dirty: bool,
     /// Stacks whose screens changed during a push or pop transition: they
@@ -935,6 +938,7 @@ impl Mounter {
             auth_session: Default::default(),
             hosts: Default::default(),
             dirty_stacks: Vec::new(),
+            untransformed: Vec::new(),
             bottom_bar_dirty: false,
             deferred_stacks: Vec::new(),
             orientations: None,
@@ -1014,6 +1018,7 @@ impl Mounter {
         if animation_changed {
             self.apply_animations();
         }
+        self.lay_out_untransformed();
         self.report_finished();
         self.start_image_loads();
         for (_, area) in &self.areas {
@@ -1353,7 +1358,9 @@ impl Mounter {
                 {
                     // Back before its removal finished animating.
                     c.native.view().layer().removeAllAnimations();
-                    apply_dynamic(c, &self.animator);
+                    if apply_dynamic(c, &self.animator) {
+                        self.untransformed.push(child);
+                    }
                 }
                 if let (Some(p), Some(c)) = (self.slot(parent), self.slot(child)) {
                     let zoom = p.zoom_view();
@@ -1665,8 +1672,10 @@ impl Mounter {
                         .iter()
                         .map(|v| v.tag() as NodeId)
                         .collect();
-                    if let Some(s) = self.slot(id) {
-                        apply_dynamic(s, &self.animator);
+                    if let Some(s) = self.slot(id)
+                        && apply_dynamic(s, &self.animator)
+                    {
+                        self.untransformed.push(id);
                     }
                     for cell in cells {
                         self.set_in_mirrored(cell, mirrored);
@@ -1913,8 +1922,10 @@ impl Mounter {
                     }
                     // Bound values apply now too (a canvas reads them when
                     // it draws next).
-                    if let Some(s) = self.slot(id) {
-                        apply_dynamic(s, &self.animator);
+                    if let Some(s) = self.slot(id)
+                        && apply_dynamic(s, &self.animator)
+                    {
+                        self.untransformed.push(id);
                     }
                     self.push_shader_args(id);
                     // A component gets what is bound again.
@@ -2284,9 +2295,6 @@ impl Mounter {
                     display_scale,
                     &self.control,
                 );
-            }
-            (Command::Speech(command), _) if id == nsh_core::ROOT_ID => {
-                crate::speech::command(&self.control, &command);
             }
             (Command::Audio(command), _) if id == nsh_core::ROOT_ID => {
                 use nsh_core::image::loader::AssetBase as Base;
@@ -2855,15 +2863,15 @@ impl Mounter {
             self.touch_listeners = self.touch_listeners.saturating_sub(1);
         }
         let on = self.touch_listeners > 0;
-        if on && self.touch_trackers.is_empty() {
+        // Ensure the root view and every modal still carry a tracker while
+        // touches are listened to. Gating this on `touch_trackers.is_empty()`
+        // left a modal opened after the first tracker set (the root's tracker
+        // outlives every modal) without one, so a modal reopened later never
+        // delivered its JS touch gestures. `add_touch_tracker` dedupes by
+        // node, so re-ensuring here each time is idempotent.
+        if on {
             self.add_touch_tracker(nsh_core::ROOT_ID);
-            let modals: Vec<NodeId> = self
-                .views
-                .iter()
-                .flatten()
-                .filter(|s| matches!(s.native, Native::Modal(_)))
-                .map(|s| s.native.view().tag() as NodeId)
-                .collect();
+            let modals: Vec<NodeId> = self.modal_attached.iter().map(|&(id, _)| id).collect();
             for modal in modals {
                 self.add_touch_tracker(modal);
             }
@@ -2932,8 +2940,10 @@ impl Mounter {
             && c.in_mirrored != mirrored
         {
             c.in_mirrored = mirrored;
-            if let Some(c) = self.slot(id) {
-                apply_dynamic(c, &self.animator);
+            if let Some(c) = self.slot(id)
+                && apply_dynamic(c, &self.animator)
+            {
+                self.untransformed.push(id);
             }
         }
     }
@@ -3132,15 +3142,19 @@ impl Mounter {
                     // the closure runs synchronously inside it.
                     let this = unsafe { &mut *this };
                     this.decorate_animated(id);
-                    if let Some(s) = this.slot(id) {
-                        apply_dynamic(s, &this.animator);
+                    if let Some(s) = this.slot(id)
+                        && apply_dynamic(s, &this.animator)
+                    {
+                        this.untransformed.push(id);
                     }
                 });
             }
             None => {
                 self.decorate(id);
-                if let Some(s) = self.slot(id) {
-                    apply_dynamic(s, &self.animator);
+                if let Some(s) = self.slot(id)
+                    && apply_dynamic(s, &self.animator)
+                {
+                    self.untransformed.push(id);
                 }
             }
         }
@@ -3845,6 +3859,8 @@ impl Mounter {
                 r
             });
         }
+        let gated = nsh_core::input::gate_activation(&v, events, activation);
+        sync_gate(&mut g.gate, view, gated, mtm);
         if let Some(press) = &g.press {
             press.set_long_press(events.contains(EventKind::LongPress) || links_long_press);
             press.set_own(own_press, handles_press, nsh_core::input::has_tap(events));
@@ -3910,6 +3926,9 @@ impl Mounter {
             || wants_context
         {
             view.setUserInteractionEnabled(true);
+        }
+        if wants_touch || wants_pinch || wants_rotation {
+            view.setMultipleTouchEnabled(true);
         }
         if let Some(nsh) = slot.native.nsh() {
             nsh.set_target(&target);
@@ -4330,7 +4349,8 @@ impl Mounter {
                     // already on screen (new content, or a header that turned
                     // large in place) would keep its offset: its content
                     // under the header, read as scrolled, the title collapsed.
-                    let at_top = scroll.contentOffset().y <= -scroll.adjustedContentInset().top;
+                    let at_top =
+                        scroll.contentOffset().y <= -scroll.adjustedContentInset().top + 0.5;
                     scroll.setContentInsetAdjustmentBehavior(
                         UIScrollViewContentInsetAdjustmentBehavior::Automatic,
                     );
@@ -4340,6 +4360,25 @@ impl Mounter {
                         scroll.setContentOffset(offset);
                     }
                 }
+            } else if let Some(scroll) = first_scroll_view(&screen.view)
+                && scroll.contentInsetAdjustmentBehavior()
+                    != UIScrollViewContentInsetAdjustmentBehavior::Never
+            {
+                let at_top = scroll.contentOffset().y <= -scroll.adjustedContentInset().top + 0.5;
+                scroll.setContentInsetAdjustmentBehavior(
+                    UIScrollViewContentInsetAdjustmentBehavior::Never,
+                );
+                if at_top {
+                    let mut offset = scroll.contentOffset();
+                    offset.y = -scroll.contentInset().top;
+                    scroll.setContentOffset(offset);
+                }
+            }
+            screen.controller.follow_large_title();
+            // A header changed under a transform is laid out for where the
+            // stack is, not for the picture the transform shows.
+            if let Some(nav) = screen.controller.navigationController() {
+                crate::navigation::lay_out_header_in_place(&nav);
             }
         }
         for (id, follows) in follows {
@@ -4556,6 +4595,10 @@ impl Mounter {
     fn wait_for(&mut self, id: NodeId, awaited: &objc2_ui_kit::UIViewController) {
         if !self.waiting_modals.contains(&id) {
             self.waiting_modals.push(id);
+        }
+        // Presented once that modal is gone: its dismissal's end does so.
+        if crate::navigation::held_under_system_ui(awaited) {
+            return;
         }
         let Some(coordinator) = awaited.transitionCoordinator() else {
             return Self::present_waiting(&self.shared);
@@ -5366,15 +5409,8 @@ impl Mounter {
                 s.gestures.pan = Some(pan);
             }
         }
-        toggle(
-            &mut s.gestures.gate,
-            activation.is_some(),
-            s.native.view(),
-            || crate::touch::PanGate::new(mtm, activation.unwrap_or_default()),
-        );
-        if let (Some(gate), Some(a)) = (&s.gestures.gate, activation) {
-            gate.set_activation(a);
-        }
+        let gated = nsh_core::input::gate_activation(&s.values, s.events, activation);
+        sync_gate(&mut s.gestures.gate, s.native.view(), gated, mtm);
         if let Some(press) = &s.gestures.press {
             press.set_long_press_delay(props.long_press_delay);
         }
@@ -6228,6 +6264,8 @@ impl Mounter {
 
     fn follow_scroll(&mut self, id: NodeId, offset: CGPoint) {
         self.pin_sticky(id);
+        // Shader views scrolled back into sight render what fell due.
+        self.shaders.revisit();
         if self.shaders.pictured()
             && let Some(s) = self.views.get(id as usize).and_then(Option::as_ref)
         {
@@ -6284,11 +6322,50 @@ impl Mounter {
         }
     }
 
+    /// Lays the stacks inside [`Mounter::untransformed`] out again.
+    ///
+    /// UIKit lays a stack out through the transforms around it: a header
+    /// that changes while a container shows the stack moved or scaled (a
+    /// push drawer) gets its bar laid out for that picture, which puts a bar
+    /// the device keeps along one side of the screen (the iPhone Duo's
+    /// vertical bar) on the side the picture is nearest. A transform going
+    /// back to the identity starts no layout pass, so the bar would stay
+    /// there, and the stack's safe area with what it was measured through
+    /// the transform, until something else lays it out.
+    fn lay_out_untransformed(&mut self) {
+        if self.untransformed.is_empty() {
+            return;
+        }
+        let views: Vec<Retained<UIView>> = std::mem::take(&mut self.untransformed)
+            .into_iter()
+            .filter_map(|id| self.slot(id).map(|s| s.native.view().retain()))
+            .collect();
+        let inside = |nav: &UINavigationController| {
+            nav.viewIfLoaded()
+                .is_some_and(|v| views.iter().any(|t| v.isDescendantOfView(t)))
+        };
+        for slot in self.views.iter().flatten() {
+            if let Native::Stack(stack) = &slot.native
+                && inside(&stack.nav)
+            {
+                crate::navigation::lay_out_in_place(&stack.nav);
+            }
+        }
+        // A collapsed split's pages are in its compact stack.
+        for split in self.splits.values() {
+            if inside(&split.compact.nav) {
+                crate::navigation::lay_out_in_place(&split.compact.nav);
+            }
+        }
+    }
+
     fn apply_animations(&mut self) {
         let animator = &self.animator;
         for &id in &self.animated {
-            if let Some(s) = self.views.get(id as usize).and_then(Option::as_ref) {
-                apply_dynamic(s, animator);
+            if let Some(s) = self.views.get(id as usize).and_then(Option::as_ref)
+                && apply_dynamic(s, animator)
+            {
+                self.untransformed.push(id);
             }
         }
         // Shaders get their bound uniforms; those that picture the views
@@ -6319,6 +6396,7 @@ impl Mounter {
                 self.pin_sticky(id);
             }
         }
+        self.lay_out_untransformed();
     }
 
     fn report_finished(&mut self) {
@@ -6410,6 +6488,26 @@ fn new_pan(
     r
 }
 
+/// Adds or removes the gate of a view's `panActivation` (`PanGate`), which
+/// decides with `activation` (`nsh_core::input::gate_activation`): none
+/// while neither the view's native pan nor its responder follows the
+/// activation, so that a view whose pan is off leaves the drags to its
+/// content, among them a stack's swipe back from the middle of its page,
+/// which the gate would otherwise prevent.
+fn sync_gate(
+    gate: &mut Option<Retained<crate::touch::PanGate>>,
+    view: &UIView,
+    activation: Option<nsh_core::PanActivation>,
+    mtm: MainThreadMarker,
+) {
+    toggle(gate, activation.is_some(), view, || {
+        crate::touch::PanGate::new(mtm, activation.unwrap_or_default())
+    });
+    if let (Some(gate), Some(a)) = (gate.as_ref(), activation) {
+        gate.set_activation(a);
+    }
+}
+
 fn toggle<G: AsRef<UIGestureRecognizer>>(
     slot: &mut Option<Retained<G>>,
     wanted: bool,
@@ -6439,6 +6537,7 @@ fn key_modifiers(flags: isize) -> nsh_core::keymap::Modifiers {
         alt: has(19),
         shift: has(17),
         cmd: has(20),
+        alt_graph: false,
     }
 }
 
@@ -6614,8 +6713,9 @@ fn shader_args<'a>(
 }
 
 /// Opacity, background color and transform: static values overridden by
-/// animated bindings.
-fn apply_dynamic(slot: &Slot, animator: &Animator) {
+/// animated bindings. True when the view's transform went back to the
+/// identity, which UIKit lays nothing out for ([`Mounter::untransformed`]).
+fn apply_dynamic(slot: &Slot, animator: &Animator) -> bool {
     if let Native::Canvas(canvas) = &slot.native {
         canvas.set_values(slot.bindings.iter().filter_map(|&(prop, node)| match prop {
             AnimationProp::CanvasArg(k) => Some((k, animator.eval(node))),
@@ -6633,7 +6733,10 @@ fn apply_dynamic(slot: &Slot, animator: &Animator) {
     }
     view.setAlpha(dynamic_opacity(slot, animator) as CGFloat);
     slot.decor.set_background(view, background);
-    view.layer().setTransform(dynamic_transform(slot, animator));
+    let layer = view.layer();
+    let transform = dynamic_transform(slot, animator);
+    let untransformed = transform.is_identity() && !layer.transform().is_identity();
+    layer.setTransform(transform);
     apply_bound_decor(slot, animator);
     if let Native::Text(text) = &slot.native {
         let color = slot.bindings.iter().find_map(|&(prop, node)| match prop {
@@ -6645,6 +6748,7 @@ fn apply_dynamic(slot: &Slot, animator: &Animator) {
         });
         text.set_color(color);
     }
+    untransformed
 }
 
 /// Runs `f` in a UIKit animation of `view` following `t`; on the

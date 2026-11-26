@@ -42,6 +42,30 @@ const STYLE_CACHE: usize = 4096;
 /// Rounds of polls and updates per run of the tasks, at most.
 const MAX_TASK_ROUNDS: u32 = 64;
 
+/// A component made by name whose part is not registered yet.
+struct ByName {
+    id: std::any::TypeId,
+    props: Box<dyn crate::element::builder::AnyProps>,
+    /// Where it was made: its context comes from there.
+    owner: crate::element::Owner,
+}
+
+thread_local! {
+    /// What asks the platform for the part that registers a component
+    /// made by name ([`set_part_requester`]).
+    static PART_REQUESTER: std::cell::Cell<Option<fn(&str)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Sets what asks the platform for the code of a component made by name
+/// that no UI set registers yet (a web runtime loads the side module of
+/// its part, then calls its gate): it gets the component's registered
+/// name. Without one, such a component shows nothing until a set
+/// registers it.
+#[doc(hidden)]
+pub fn set_part_requester(request: fn(&str)) {
+    PART_REQUESTER.with(|r| r.set(Some(request)));
+}
+
 /// What renders on a host node.
 enum Inner {
     /// Nothing is registered under the name: renders nothing.
@@ -219,6 +243,9 @@ pub(super) struct Instance {
     /// style and animated values.
     pub(super) app_style: Option<crate::StylePatch>,
     dirty: bool,
+    /// Its view is made again, in place of the one it showed (a component
+    /// made by name, made when its part is registered).
+    remake: bool,
     /// The nodes of its view with bindings: what was applied last. Boxed:
     /// a record is large, and a map's free slots are as large as its
     /// entries.
@@ -374,6 +401,7 @@ impl Instance {
             responders: Vec::new(),
             app_style,
             dirty: false,
+            remake: false,
             bound: FxHashMap::default(),
             js_kids: None,
             cell_owner: None,
@@ -650,15 +678,6 @@ struct SecondInstances {
     next: Option<AnswerSlot<crate::single_instance::SecondInstance>>,
 }
 
-/// The speech recognition session running ([`crate::speech`]).
-struct SpeechSession {
-    id: u32,
-    /// Where its events go, to the app.
-    sink: crate::speech::SpeechSink,
-    /// The embedding app's recognizer's session; `None`: the platform's.
-    control: Option<Box<dyn crate::speech::SpeechControl>>,
-}
-
 /// The core's component state.
 pub(super) struct Components {
     pub(super) web_evaluations: super::web_evaluation::Evaluations,
@@ -678,6 +697,9 @@ pub(super) struct Components {
     /// Boxed: making a view (or applying its patches) takes its instance
     /// out of the map and back.
     pub(super) instances: FxHashMap<NodeId, Box<Instance>>,
+    /// Hosts of components made by name whose part is not registered yet
+    /// ([`crate::element::ComponentElement::by_name`]): made when it is.
+    by_name: FxHashMap<NodeId, ByName>,
     /// Expanded node -> the host of the component whose view made it.
     pub(super) owners: FxHashMap<NodeId, NodeId>,
     /// Changes when reconciliation releases an expanded element or raw
@@ -697,6 +719,10 @@ pub(super) struct Components {
     /// ([`Core::preceding`], `native_before_at`, `first_overlay_in`).
     #[cfg(test)]
     pub(super) placing_work: std::cell::Cell<usize>,
+    /// Siblings looked at to find children's positions among them
+    /// ([`Core::positions_changed`], `position_bits`).
+    #[cfg(test)]
+    pub(super) position_work: std::cell::Cell<usize>,
     /// Mount items looked at when views take the kind of their
     /// component's root ([`Core::retag`]).
     #[cfg(test)]
@@ -721,7 +747,7 @@ pub(super) struct Components {
     styles: FxHashMap<StyleRefinement, std::rc::Rc<ClassList>>,
     /// The styles a component on another's host gets from each above it,
     /// merged (by the lists', which the entry keeps).
-    merges: FxHashMap<(usize, usize), [std::rc::Rc<ClassList>; 3]>,
+    pub(super) merges: FxHashMap<(usize, usize), [std::rc::Rc<ClassList>; 3]>,
     /// While a view's slot content is matched: the nested component's host
     /// and the slot (its regions are the slot's).
     pub(super) filling: Option<(NodeId, &'static str)>,
@@ -737,6 +763,18 @@ pub(super) struct Components {
     pub(super) environment: Environment,
     /// Runs the components' async tasks and timers.
     pub(super) executor: Rc<Executor>,
+    /// Windows JS opened (`<Window>`) -> the owner and ref the Rust
+    /// components inside them render under ([`Core::js_window_owner`]).
+    js_windows: FxHashMap<NodeId, (crate::element::Owner, crate::element::desktop::WindowRef)>,
+    /// What the platform last reported of the windows of the app's own:
+    /// their state and title bar area, for the refs made after it.
+    window_reports: FxHashMap<
+        NodeId,
+        (
+            Option<crate::desktop::WindowState>,
+            crate::geometry::Edges<Points>,
+        ),
+    >,
     /// The status bar's settings, shared by components, modules and tasks.
     pub(super) status_bars: crate::element::status_bar::StatusBars,
     /// Dialogs components show, by id: their answers.
@@ -759,8 +797,6 @@ pub(super) struct Components {
         ),
     >,
     next_pick: u32,
-    /// The speech recognition session running, if any.
-    speech: Option<SpeechSession>,
     /// The sounds and players open, by id: where their events go.
     audio: FxHashMap<u32, crate::audio::AudioSink>,
     /// What notifications wait for ([`crate::notifications`]).
@@ -869,6 +905,12 @@ pub(super) struct Components {
     insets: FxHashMap<NodeId, EdgeInsets>,
     /// JS listens to the back button (`BackHandler`) on the root.
     js_back: bool,
+    /// JS listens to the back gesture's steps (`BackHandler.on("progress",
+    /// ..)`) on the root.
+    js_back_progress: bool,
+    /// The app's listeners follow the back gesture under way: decided as it
+    /// starts, so a gesture an overlay takes stays the overlay's to its end.
+    back_gesture: bool,
     /// JS's keyboard shortcuts (`nsh/keymap`: the root's `Prop::Keymap`),
     /// which the root's table joins with the views'.
     js_keymap: Arc<crate::keymap::Keymap>,
@@ -911,6 +953,7 @@ impl Default for Components {
             app_tokens: Arc::new(Tokens::default()),
             host_tokens: None,
             instances: FxHashMap::default(),
+            by_name: FxHashMap::default(),
             owners: FxHashMap::default(),
             release_generation: 0,
             released_hosts: FxHashSet::default(),
@@ -920,6 +963,8 @@ impl Default for Components {
             handler_visits: Default::default(),
             #[cfg(test)]
             placing_work: Default::default(),
+            #[cfg(test)]
+            position_work: Default::default(),
             #[cfg(test)]
             retag_work: Default::default(),
             #[cfg(test)]
@@ -936,6 +981,8 @@ impl Default for Components {
             lists: FxHashMap::default(),
             environment: Environment::default(),
             executor: Rc::new(Executor::default()),
+            js_windows: FxHashMap::default(),
+            window_reports: FxHashMap::default(),
             status_bars: Default::default(),
             dialogs: FxHashMap::default(),
             next_dialog: 1,
@@ -961,7 +1008,6 @@ impl Default for Components {
             next_clipboard_read: 1,
             picks: FxHashMap::default(),
             next_pick: 1,
-            speech: None,
             audio: FxHashMap::default(),
             notifications: Notifications::default(),
             url_schemes: UrlScheme::default(),
@@ -992,6 +1038,8 @@ impl Default for Components {
             list_layouts: FxHashMap::default(),
             insets: FxHashMap::default(),
             js_back: false,
+            js_back_progress: false,
+            back_gesture: false,
             js_keymap: Arc::new(crate::keymap::Keymap::default()),
             js_keys: false,
             touch: super::touch::TouchState::default(),
@@ -1121,6 +1169,87 @@ impl<M: TextEngine> Core<M> {
             registry.run_setups_not_in(&self.components.registry);
         }
         self.components.registry = registry;
+        self.make_by_name();
+    }
+
+    /// Makes the components made by name whose part is registered now.
+    fn make_by_name(&mut self) {
+        if self.components.by_name.is_empty() {
+            return;
+        }
+        let _entered = self.components.runtime.enter();
+        let hosts: Vec<NodeId> = self.components.by_name.keys().copied().collect();
+        for host in hosts {
+            let Some(waiting) = self.components.by_name.get(&host) else {
+                continue;
+            };
+            let still = self
+                .components
+                .instances
+                .get(&host)
+                .is_some_and(|i| matches!(i.inner, Inner::Missing));
+            if !still {
+                self.components.by_name.remove(&host);
+                continue;
+            }
+            let Some((spec, mut inner)) = self.components.registry.make_type(waiting.id) else {
+                continue;
+            };
+            let waiting = self.components.by_name.remove(&host).expect("waiting");
+            inner.place(host, waiting.owner);
+            inner.set_props(waiting.props.as_any());
+            // Its view is made in place of the empty one it showed.
+            if let Some(inst) = self.components.instances.get_mut(&host) {
+                inst.inner = Inner::Component(inner);
+                inst.spec = Some(spec);
+                inst.remake = true;
+            }
+            self.components.mark(host);
+        }
+    }
+
+    /// Makes `host` the host of component element `c`: by its type, or
+    /// by its registered name ([`crate::element::ComponentElement::by_name`]).
+    fn create_instance_for(&mut self, host: NodeId, c: &crate::element::builder::ComponentEl) {
+        let Some(id) = c.by_name else {
+            self.create_instance_of(host, c.name, c.make, c.spec);
+            return;
+        };
+        if self.is_host(host) {
+            return;
+        }
+        match self.components.registry.make_type(id) {
+            Some((spec, inner)) => self.insert_instance(host, Some(spec), Inner::Component(inner)),
+            None => {
+                self.insert_instance(host, None, Inner::Missing);
+                self.components.by_name.insert(
+                    host,
+                    ByName {
+                        id,
+                        props: c.props.clone_box(),
+                        owner: crate::element::Owner::current(),
+                    },
+                );
+                let name = crate::element::component::export_name(c.name);
+                match PART_REQUESTER.with(|r| r.get()) {
+                    Some(request) => request(name),
+                    None => log::debug!("`{name}` waits for the part that registers it"),
+                }
+            }
+        }
+    }
+
+    /// Sets the props of `host`'s component from its element.
+    fn set_element_props(&mut self, host: NodeId, props: &dyn crate::element::builder::AnyProps) {
+        if let Some(waiting) = self.components.by_name.get_mut(&host) {
+            waiting.props = props.clone_box();
+            return;
+        }
+        if let Some(inst) = self.components.instances.get_mut(&host)
+            && let Inner::Component(inner) = &mut inst.inner
+        {
+            inner.set_props(props.as_any());
+        }
     }
 
     /// `uiTheme` on the root: the app's theme file (`nsh.json`, `setTheme`),
@@ -1247,9 +1376,17 @@ impl<M: TextEngine> Core<M> {
 
     /// The embedding app's design tokens (`None`: the app's again): an app
     /// embedded in a native app looks like it, whatever the app sets.
+    /// Text inherits its `foreground` token unless it sets its own color.
     pub fn set_host_tokens(&mut self, tokens: Option<Tokens>) {
         self.components.host_tokens = tokens.map(Arc::new);
         self.tokens_changed();
+        // Embedded content inherits the host's foreground unless it sets its own.
+        let classes = if self.components.host_tokens.is_some() {
+            vec!["text-foreground".into()]
+        } else {
+            Vec::new()
+        };
+        self.set_classes(self.root, None, Some(classes));
     }
 
     /// What [`Core::tokens`] become when the root's `uiTheme` (the app's
@@ -1355,12 +1492,8 @@ impl<M: TextEngine> Core<M> {
         let id = self.components.alloc();
         let _ = self.apply_op(Op::Create { id, tag: el.tag });
         made(self, id);
-        self.create_instance_of(id, c.name, c.make, c.spec);
-        if let Some(inst) = self.components.instances.get_mut(&id)
-            && let Inner::Component(inner) = &mut inst.inner
-        {
-            inner.set_props(c.props.as_any());
-        }
+        self.create_instance_for(id, &c);
+        self.set_element_props(id, c.props.as_ref());
         Some(id)
     }
 
@@ -1408,8 +1541,14 @@ impl<M: TextEngine> Core<M> {
             || self.components.environment.locale != environment.locale
             || self.components.environment.locale_settings.languages
                 != environment.locale_settings.languages;
-        self.keyboard_moved |=
+        let keyboard_moved =
             self.components.environment.keyboard_height != environment.keyboard_height;
+        self.keyboard_moved |= keyboard_moved;
+        // The room the root view's anchored overlays keep to leaves the
+        // keyboard out (`Core::overlay_area`): laid out and placed again.
+        if keyboard_moved && self.root_overlay_shown() {
+            self.needs_layout = true;
+        }
         let ratio = self.components.environment.pixel_ratio;
         self.components.environment = environment;
         if ratio != environment.pixel_ratio {
@@ -1603,6 +1742,13 @@ impl<M: TextEngine> Core<M> {
     /// Whether the work quit listeners started is still running.
     pub fn quit_pending(&self) -> bool {
         self.components.executor.quitting.get() > 0
+    }
+
+    /// Whether a JS call of an `async fn` into Rust (a native module's, a
+    /// class's) has not answered yet: its answer comes from elsewhere (a
+    /// request made in Rust, another thread), which nothing else counts.
+    pub fn async_calls_pending(&self) -> bool {
+        self.components.executor.calls.get() > 0
     }
 
     /// Runs the closures that waited for the app's answer to the events
@@ -1819,6 +1965,10 @@ impl<M: TextEngine> Core<M> {
                 child,
                 before,
             } if self.is_host(parent) => {
+                // A raw text run (`<Button>Open</Button>`) has no node
+                // until a use needs one: the view places it, so it does.
+                let run = self.runs.contains_key(&child);
+                self.materialize_run(child)?;
                 self.key(child)?;
                 let inst = self.components.instances.get_mut(&parent).expect("host");
                 let was_empty = inst.js_children.is_empty();
@@ -1844,7 +1994,18 @@ impl<M: TextEngine> Core<M> {
                             parent: p,
                             child,
                             before: at.and(before).or(anchor),
-                        })?
+                        })?;
+                        if run
+                            && self
+                                .key(p)
+                                .is_ok_and(|k| self.nodes[k as usize].kind != Kind::Text)
+                        {
+                            let text = self.key(child).map_or("", |k| &self.nodes[k as usize].text);
+                            log::warn!(
+                                target: "js",
+                                "text in a component's children is not shown: text shows in a <Text> (`<Text>{text}</Text>`)"
+                            );
+                        }
                     }
                     Placement::Nested(nested, anchor) => {
                         let anchor = self.anchor_node(anchor);
@@ -1902,6 +2063,27 @@ impl<M: TextEngine> Core<M> {
                 Ok(Some(Op::Listen {
                     id: crate::ROOT_ID,
                     event: EventKind::BackPress,
+                    enabled: enabled || rust,
+                }))
+            }
+            // The root listens to the back gesture's steps while JS or a
+            // component does.
+            Op::Listen {
+                id: crate::ROOT_ID,
+                event: EventKind::BackProgress,
+                enabled,
+            } => {
+                self.components.js_back_progress = enabled;
+                let rust = !self
+                    .components
+                    .executor
+                    .back_progress
+                    .borrow()
+                    .list
+                    .is_empty();
+                Ok(Some(Op::Listen {
+                    id: crate::ROOT_ID,
+                    event: EventKind::BackProgress,
                     enabled: enabled || rust,
                 }))
             }
@@ -2142,12 +2324,15 @@ impl<M: TextEngine> Core<M> {
             RustCall::Task(start) => match caught(start) {
                 Ok(future) => {
                     let executor = Rc::downgrade(&self.components.executor);
+                    let pending =
+                        crate::element::quit::Pending::new(&self.components.executor.calls);
                     // A task of the root: it never goes away.
                     crate::element::task::spawn_raw(
                         &self.components.executor,
                         ROOT_ID,
                         Box::pin(async move {
                             let result = crate::element::module::catching(future).await;
+                            drop(pending);
                             match executor.upgrade() {
                                 Some(executor) if call != 0 => {
                                     executor.act(Action::Return(call, result));
@@ -2355,12 +2540,28 @@ impl<M: TextEngine> Core<M> {
             let failed = self.report_failures();
             let woke = self.wake_waiting();
             let called = self.run_parked_methods();
-            if !changed && !rendered && !failed && !woke && !called {
+            if !changed && !rendered && !failed && !woke && !called && !self.run_after_render() {
                 break;
             }
         }
         self.flush_renders();
         self.end_retags();
+    }
+
+    /// Runs what waited for the commit's views ([`crate::element::after_render`]);
+    /// whether there was any (what it asked for and changed renders in this
+    /// round too).
+    fn run_after_render(&mut self) -> bool {
+        let rendered = self.components.executor.take_rendered();
+        if rendered.is_empty() {
+            return false;
+        }
+        for crate::element::AfterAnswer { f, .. } in rendered {
+            if let Err(message) = caught(f) {
+                log::error!(target: "js", "a closure after the views rendered failed: {message}");
+            }
+        }
+        true
     }
 
     /// Node `id` goes: what the views' renders and the app's classes knew
@@ -2653,6 +2854,37 @@ impl<M: TextEngine> Core<M> {
         crate::element::Owner::detached()
     }
 
+    /// The owner a component JS made in a window JS opened renders under
+    /// when no component is above it: one per window, providing its ref,
+    /// so [`crate::element::desktop::current_window`] is that window (its
+    /// title bar area, its dialogs). `None` in the main window.
+    fn js_window_owner(&mut self, host: NodeId) -> Option<crate::element::Owner> {
+        let key = self.key(host).ok()?;
+        let window = self.key_window(key);
+        if window == ROOT_ID {
+            return None;
+        }
+        if let Some((owner, _)) = self.components.js_windows.get(&window)
+            && owner.is_live()
+        {
+            return Some(*owner);
+        }
+        let id = self
+            .window_ids
+            .iter()
+            .find_map(|(id, (node, _))| (*node == window).then(|| id.clone()))?;
+        let reported = self
+            .components
+            .window_reports
+            .get(&window)
+            .copied()
+            .unwrap_or_default();
+        let (owner, this) =
+            crate::element::desktop::js_window(&id, window, &self.components.executor, reported);
+        self.components.js_windows.insert(window, (owner, this));
+        Some(owner)
+    }
+
     /// The host of the component that runs once whose owner is `owner`, or
     /// whose view made it (a binding's own owner is under the component's).
     fn host_of_owner(&self, owner: crate::element::Owner) -> Option<NodeId> {
@@ -2710,11 +2942,17 @@ impl<M: TextEngine> Core<M> {
                 inner.set_children(!inst.js_children.is_empty());
                 // Its view is made: its props now reach what read them, and
                 // the app's (or its parent's) styles may have changed.
-                if inst.root.is_some() {
+                if inst.root.is_some() && !std::mem::take(&mut inst.remake) {
                     self.restyle_view(host, inst);
                     return None;
                 }
-                inner.adopt(self.owner_above(host));
+                let owner = self.owner_above(host);
+                let owner = if owner.is_live() {
+                    owner
+                } else {
+                    self.js_window_owner(host).unwrap_or(owner)
+                };
+                inner.adopt(owner);
                 // A view that fails shows nothing.
                 caught(|| inner.view()).unwrap_or_else(|message| {
                     failure = Some(message);
@@ -3103,7 +3341,7 @@ impl<M: TextEngine> Core<M> {
                     return;
                 }
                 self.components.owners.insert(id, host);
-                self.create_instance_of(id, c.name, c.make, c.spec);
+                self.create_instance_for(id, c);
                 if let Some(rooted) = self.components.instances.get_mut(&id) {
                     // The app's style is the top host's.
                     rooted.app_style = None;
@@ -3442,12 +3680,7 @@ impl<M: TextEngine> Core<M> {
             Some(self.components.lowered(style))
         };
         if !same(&own, &old.0) || !same(&user, &old.1) {
-            let list = match (&own, &user) {
-                (Some(a), Some(b)) => Some(std::rc::Rc::new(a.merged(b))),
-                (Some(a), None) => Some(a.clone()),
-                (None, Some(b)) => Some(b.clone()),
-                (None, None) => None,
-            };
+            let list = self.merge_user(own.clone(), user.clone());
             if let Ok(key) = self.key(id) {
                 self.set_class_list(key, list);
             }
@@ -4730,7 +4963,7 @@ impl<M: TextEngine> Core<M> {
                 let _ = self.apply_op(Op::Create { id, tag: el.tag });
                 self.components.owners.insert(id, host);
                 if let ElKind::Component(c) = &el.kind {
-                    self.create_instance_of(id, c.name, c.make, c.spec);
+                    self.create_instance_for(id, c);
                 }
                 (
                     id,
@@ -4752,11 +4985,7 @@ impl<M: TextEngine> Core<M> {
         if let Some(c) = component {
             // A nested component: its props, and the styles as the app's
             // classes of its host.
-            if let Some(nested) = self.components.instances.get_mut(&id)
-                && let Inner::Component(inner) = &mut nested.inner
-            {
-                inner.set_props(c.props.as_any());
-            }
+            self.set_element_props(id, c.props.as_ref());
             if self.is_host(id) {
                 if let Some(style) = nested_style {
                     el.style = self.bind_nested_style(id, style);
@@ -6219,101 +6448,6 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
-    /// Applies a speech recognition session's request: through the
-    /// embedding app's recognizer when it gave one, else as commands on the
-    /// root the platform answers with [`EventKind::Speech`].
-    fn speech_action(&mut self, action: crate::element::SpeechAction) {
-        use crate::{
-            element::SpeechAction,
-            speech::{SpeechCommand, SpeechError},
-        };
-        match action {
-            SpeechAction::Available(answer) => {
-                let available = match &self.speech {
-                    Some(backend) => backend.available(),
-                    None => self.components.environment.speech,
-                };
-                answer.borrow_mut().deliver(available);
-            }
-            SpeechAction::Start { id, request, sink } => {
-                // One session at a time: the microphone is one.
-                if let Some(running) = self.components.speech.as_ref().map(|s| s.id) {
-                    self.speech_action(SpeechAction::Abort(running));
-                }
-                if !self.access.allows_speech() {
-                    sink.end(Some(SpeechError::NotAllowed));
-                    self.deny(
-                        "speech recognition is not granted: add `\"speech\": true` to \
-                         capabilities in nsh.json"
-                            .into(),
-                    );
-                    return;
-                }
-                if let Some(backend) = self.speech.clone() {
-                    let control = backend.start(request, sink.clone());
-                    self.components.speech = Some(SpeechSession {
-                        id,
-                        sink,
-                        control: Some(control),
-                    });
-                    return;
-                }
-                if !self.components.environment.speech {
-                    sink.end(Some(SpeechError::Unavailable));
-                    return;
-                }
-                self.components.speech = Some(SpeechSession {
-                    id,
-                    sink,
-                    control: None,
-                });
-                let _ = self.apply_op(Op::Command {
-                    id: crate::ROOT_ID,
-                    command: Command::Speech(SpeechCommand::Start { id, request }),
-                });
-            }
-            SpeechAction::Stop(id) => {
-                let Some(session) = self.components.speech.as_mut().filter(|s| s.id == id) else {
-                    return;
-                };
-                if session.sink.is_ended() {
-                    return;
-                }
-                match &mut session.control {
-                    Some(control) => control.stop(),
-                    None => {
-                        let _ = self.apply_op(Op::Command {
-                            id: crate::ROOT_ID,
-                            command: Command::Speech(SpeechCommand::Stop { id }),
-                        });
-                    }
-                }
-            }
-            SpeechAction::Abort(id) => {
-                if self.components.speech.as_ref().is_none_or(|s| s.id != id) {
-                    return;
-                }
-                let Some(mut session) = self.components.speech.take() else {
-                    return;
-                };
-                // Ended for the app now; what the recognizer reports
-                // after this is dropped.
-                if !session.sink.end(None) {
-                    return;
-                }
-                match &mut session.control {
-                    Some(control) => control.abort(),
-                    None => {
-                        let _ = self.apply_op(Op::Command {
-                            id: crate::ROOT_ID,
-                            command: Command::Speech(SpeechCommand::Abort { id }),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
     /// Applies a sound's or a player's request: through the embedding
     /// app's audio stack when it gave one, else as commands on the root the
     /// platform answers with [`EventKind::Audio`].
@@ -6707,7 +6841,6 @@ impl<M: TextEngine> Core<M> {
                     self.components.environment.app_settings && self.access.allows_application();
                 answer.borrow_mut().deliver(available);
             }
-            Action::Speech(action) => self.speech_action(action),
             Action::Audio(action) => self.audio_action(action),
             Action::Notification(action) => self.notification_action(action),
             Action::LoginItem(enabled, answer) => self.login_item_action(enabled, answer),
@@ -7533,6 +7666,34 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
+    /// What the platform reported of window `id` reaches the ref of the
+    /// Rust components in it ([`Core::js_window_owner`]); a closed window's
+    /// goes.
+    fn report_window(&mut self, id: NodeId, event: &crate::desktop::WindowEvent) {
+        use crate::desktop::WindowEvent;
+        match event {
+            WindowEvent::State(state) => {
+                self.components.window_reports.entry(id).or_default().0 = Some(**state);
+            }
+            WindowEvent::TitleBar(area) => {
+                self.components.window_reports.entry(id).or_default().1 = *area;
+            }
+            WindowEvent::Closed { .. } => {
+                self.components.window_reports.remove(&id);
+                if let Some((owner, _)) = self.components.js_windows.remove(&id) {
+                    let _entered = self.components.runtime.enter();
+                    owner.dispose();
+                }
+                return;
+            }
+            _ => return,
+        }
+        if let Some((_, this)) = self.components.js_windows.get(&id) {
+            let _entered = self.components.runtime.enter();
+            this.report(event);
+        }
+    }
+
     /// Events the components handle before anything else: dialog answers
     /// (theirs never reach JS), insets of screens and modals.
     fn platform_event(&mut self, id: NodeId, kind: EventKind, payload: &EventPayload) -> bool {
@@ -7554,6 +7715,9 @@ impl<M: TextEngine> Core<M> {
             // event goes on to the app.
             EventKind::Window => {
                 if let EventPayload::Window(event) = payload {
+                    if id != ROOT_ID {
+                        self.report_window(id, event);
+                    }
                     match event.as_ref() {
                         crate::desktop::WindowEvent::State(state) => {
                             self.keep_window_placement(id, state);
@@ -7696,6 +7860,41 @@ impl<M: TextEngine> Core<M> {
                 });
                 true
             }
+            EventKind::BackProgress if id == crate::ROOT_ID => {
+                let Some(event) = crate::BackProgressEvent::from_payload(payload) else {
+                    return true;
+                };
+                // The press of a gesture the top overlay listening to
+                // `onCancel` takes is the overlay's: the app follows only
+                // the gestures that start without one.
+                if event.phase == crate::BackPhase::Start {
+                    self.components.back_gesture = !self.overlay_state.cancel;
+                }
+                if !self.components.back_gesture {
+                    return true;
+                }
+                if matches!(
+                    event.phase,
+                    crate::BackPhase::End | crate::BackPhase::Cancel
+                ) {
+                    self.components.back_gesture = false;
+                }
+                let listeners = self
+                    .components
+                    .executor
+                    .back_progress
+                    .borrow()
+                    .newest_first();
+                for listener in listeners {
+                    let result = caught(|| listener(&event));
+                    self.apply_actions();
+                    if let Err(message) = result {
+                        log::error!(target: "js", "a back progress listener failed: {message}");
+                    }
+                }
+                // JS's listeners hear it next.
+                !self.components.js_back_progress
+            }
             EventKind::WebEvaluation => {
                 self.answer_web_evaluation(id, payload);
                 true
@@ -7719,26 +7918,6 @@ impl<M: TextEngine> Core<M> {
                     (_, _, error) => Err(error.unwrap_or_else(|| "no size".into())),
                 };
                 self.answer_image_info(request as u32, size);
-                true
-            }
-            EventKind::Speech if id == crate::ROOT_ID => {
-                let EventPayload::Speech { id: session, event } = payload else {
-                    return false;
-                };
-                let running = self
-                    .components
-                    .speech
-                    .as_ref()
-                    .is_some_and(|s| s.id == *session);
-                if running {
-                    let ended = matches!(event, crate::speech::SpeechEvent::End { .. });
-                    if let Some(s) = &self.components.speech {
-                        s.sink.send(event.clone());
-                    }
-                    if ended {
-                        self.components.speech = None;
-                    }
-                }
                 true
             }
             EventKind::Audio if id == crate::ROOT_ID => {
@@ -8045,6 +8224,23 @@ impl<M: TextEngine> Core<M> {
         });
     }
 
+    /// The root listens to the back gesture's steps while JS or a component
+    /// does: follows the components' listeners coming and going.
+    pub(super) fn sync_back_progress(&mut self) {
+        let rust = {
+            let mut progress = self.components.executor.back_progress.borrow_mut();
+            if !std::mem::take(&mut progress.changed) {
+                return;
+            }
+            !progress.list.is_empty()
+        };
+        let _ = self.apply_op(Op::Listen {
+            id: crate::ROOT_ID,
+            event: EventKind::BackProgress,
+            enabled: rust || self.components.js_back_progress,
+        });
+    }
+
     /// The root's shortcuts follow the views' bindings coming and going:
     /// the table JS's and theirs make, listened to while either has one.
     pub(super) fn sync_keys(&mut self) {
@@ -8105,15 +8301,15 @@ impl<M: TextEngine> Core<M> {
         drop(keys);
         // JS's first, then the views', where the newest that may fire wins:
         // a focused component's keys win over the app's. Bindings
-        // `over_focused` come after both, so they win over the components';
+        // `OverFocused::Always` come after both, so they win over the components';
         // the overlay's Escape (a popup closing) stays last.
         let js = self.components.js_keymap.bindings();
         let bindings = js
             .iter()
-            .filter(|b| !b.over_focused)
-            .chain(views.iter().filter(|b| !b.over_focused))
-            .chain(js.iter().filter(|b| b.over_focused))
-            .chain(views.iter().filter(|b| b.over_focused))
+            .filter(|b| !b.comes_after_views())
+            .chain(views.iter().filter(|b| !b.comes_after_views()))
+            .chain(js.iter().filter(|b| b.comes_after_views()))
+            .chain(views.iter().filter(|b| b.comes_after_views()))
             .copied()
             .chain(overlay)
             .collect();
@@ -8146,9 +8342,27 @@ impl<M: TextEngine> Core<M> {
         safe
     }
 
+    /// Whether `key` or a view around it already stands clear of the
+    /// software keyboard (`Prop::ClearsKeyboard`, a bottom sheet the
+    /// keyboard lifts): the keyboard takes nothing more from it.
+    fn clears_keyboard(&self, key: super::Key) -> bool {
+        let mut key = key;
+        loop {
+            let node = &self.nodes[key as usize];
+            if node.clears_keyboard {
+                return true;
+            }
+            if node.parent == NO_KEY {
+                return false;
+            }
+            key = node.parent;
+        }
+    }
+
     /// What `env` (a node's `env()` terms) comes to for `key` now: the
     /// insets of the root view it renders in ([`Self::insets_of`]) and the
-    /// software keyboard's height.
+    /// software keyboard's height, 0 where a view around it stands clear
+    /// of the keyboard already ([`Self::clears_keyboard`]).
     pub(super) fn env_insets(
         &self,
         key: super::Key,
@@ -8161,6 +8375,9 @@ impl<M: TextEngine> Core<M> {
                 return Points::ZERO;
             };
             if var == EnvVar::KeyboardInsetHeight {
+                if self.clears_keyboard(key) {
+                    return Points::ZERO;
+                }
                 return self
                     .components
                     .environment

@@ -153,15 +153,19 @@ test('a link stays in its run, drawn in its text\'s bidi order', { skip: !chromi
   const dir = await mkdtemp(join(tmpdir(), 'nsh-text-link-'));
   try {
     const source = await readFile(new URL('./nsh.js', import.meta.url), 'utf8');
-    const module = 'data:text/javascript;base64,' + Buffer.from(source + '\nexport { fillRun };').toString('base64');
+    const module = 'data:text/javascript;base64,' + Buffer.from(source + '\nexport { fillRun, KEYFRAMES };').toString('base64');
     await writeFile(join(dir, 'index.html'), `<!doctype html><meta charset="utf-8"><body><script type="module">
-      import { fillRun } from '${module}';
+      import { fillRun, KEYFRAMES } from '${module}';
       try {
+        // The runtime's rules: how the a of a link of text looks.
+        const style = document.createElement('style');
+        style.textContent = KEYFRAMES;
+        document.head.append(style);
         const near = (a,b,what) => { if (Math.abs(a-b)>0.5) throw Error(what+': '+a+' != '+b); };
-        const run = (parts) => {
+        const run = (parts, address = null) => {
           const el = document.createElement('span');
-          el.style.cssText = 'position:absolute;left:0;top:0;white-space:pre;font:400 20px Arial';
-          fillRun(el, 'אב גד', parts, [{ node: 3 }]);
+          el.style.cssText = 'position:absolute;left:0;top:0;white-space:pre;font:400 20px Arial;color:rgb(10, 20, 30)';
+          fillRun(el, 'אב גד', parts, [{ node: 3, events: new Set(['onPress']), address }]);
           document.body.append(el);
           return el;
         };
@@ -172,16 +176,25 @@ test('a link stays in its run, drawn in its text\'s bidi order', { skip: !chromi
           return r.getBoundingClientRect();
         };
         // The same text without a link, and with its second word one,
-        // styled as the rest (one run).
+        // styled as the rest (one run): a span, or an a where it goes
+        // somewhere a browser opens.
         const plain = run(null);
-        const linked = run([[3, 5, 0]]);
-        const link = linked.querySelector('span');
-        if (link?._link?.node !== 3 || link.textContent !== 'גד') throw Error('the link has no span of its own');
-        near(linked.getBoundingClientRect().width, plain.getBoundingClientRect().width, 'run width');
-        near(link.getBoundingClientRect().left, box(plain, 3, 5).left, 'link left');
-        near(link.getBoundingClientRect().width, box(plain, 3, 5).width, 'link width');
-        // Right to left: the second word is drawn left of the first.
-        if (!(link.getBoundingClientRect().right <= box(plain, 0, 2).left + 0.5)) throw Error('the words are not right to left');
+        for (const [tag, address] of [['span', null], ['a', 'https://example.com/guide']]) {
+          const linked = run([[3, 5, 0]], address);
+          const link = linked.querySelector(tag);
+          if (link?._link?.node !== 3 || link.textContent !== 'גד') throw Error(tag + ': the link has no element of its own');
+          if (link.getAttribute('href') !== address) throw Error(tag + ': href ' + link.getAttribute('href'));
+          near(linked.getBoundingClientRect().width, plain.getBoundingClientRect().width, tag + ' run width');
+          near(link.getBoundingClientRect().left, box(plain, 3, 5).left, tag + ' link left');
+          near(link.getBoundingClientRect().width, box(plain, 3, 5).width, tag + ' link width');
+          // Right to left: the second word is drawn left of the first.
+          if (!(link.getBoundingClientRect().right <= box(plain, 0, 2).left + 0.5)) throw Error(tag + ': the words are not right to left');
+          // The run's color and decoration, none of the browser's link
+          // blue or underline.
+          const drawn = getComputedStyle(link);
+          if (drawn.color !== 'rgb(10, 20, 30)') throw Error(tag + ': color ' + drawn.color);
+          if (drawn.textDecorationLine !== 'none') throw Error(tag + ': decoration ' + drawn.textDecorationLine);
+        }
         document.body.dataset.result = 'passed';
       } catch(e) { document.body.dataset.result = 'failed: '+e.message; }
     </script>`);
@@ -346,6 +359,59 @@ test('a text streamed in keeps the spans and breaks of the lines it already had'
         await settle();
         if (el.textContent !== 'one two three four') throw Error('shrunk: ' + JSON.stringify(el.textContent));
         if (added !== 0 || removed !== 2) throw Error('shrinking added ' + added + ', removed ' + removed);
+        document.body.dataset.result = 'passed';
+      } catch (e) { document.body.dataset.result = 'failed: ' + e.message; }
+    </script>`);
+    const html = execFileSync(chromium, ['--headless', '--no-sandbox', '--disable-dev-shm-usage',
+      '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--virtual-time-budget=1000',
+      '--user-data-dir=' + join(dir, 'profile'), '--dump-dom', pathToFileURL(join(dir, 'index.html')).href],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 20000, maxBuffer: 1024 * 1024 });
+    assert.equal(html.match(/data-result="([^"]*)"/)?.[1], 'passed');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('a run in a taller line gets a line box that tall around the same baseline', { skip: !chromium }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'nsh-text-line-box-'));
+  try {
+    const source = await readFile(new URL('./nsh.js', import.meta.url), 'utf8');
+    const module = 'data:text/javascript;base64,' + Buffer.from(source + '\nexport { Player, defineClass };').toString('base64');
+    await writeFile(join(dir, 'index.html'), `<!doctype html><meta charset="utf-8"><style>body { margin:0; } .nsh-run { position:absolute; white-space:pre; }</style><script type="module">
+      import { Player, defineClass } from '${module}';
+      try {
+        // A run style as the engine writes it: the font with its own line height.
+        defineClass('nsh-test-run', 'font: 400 20px / 23px Arial;');
+        const player = Object.create(Player.prototype);
+        player.styleClass = () => 'nsh-test-run';
+        player.metricsCache = new Map();
+        player.measure = document.createElement('canvas').getContext('2d');
+        const el = document.createElement('div');
+        el._animation = {};
+        el.style.cssText = 'position:absolute;left:0;top:0';
+        document.body.append(el);
+        const baseline = (span) => {
+          const mark = document.createElement('i');
+          mark.style.cssText = 'display:inline-block;width:0;height:0;vertical-align:baseline';
+          span.append(mark);
+          const y = mark.getBoundingClientRect().top;
+          mark.remove();
+          return y;
+        };
+        // [x, y, text, style, start, parts, after, lineHeight]
+        player.replaceRuns(el, 0, 0, [[0, 10, 'Hg', 0, 0, null, null]], [{}], null, null);
+        let span = el.querySelector('.nsh-run');
+        const own = baseline(span), ownHeight = span.getBoundingClientRect().height;
+        if (span.style.lineHeight) throw Error('a run of its own height got ' + span.style.lineHeight);
+        for (const height of [40, 33.75, 18]) {
+          player.replaceRuns(el, 0, 0, [[0, 10, 'Hg', 0, 0, null, null, height]], [{}], null, null);
+          span = el.querySelector('.nsh-run');
+          if (span.getBoundingClientRect().height !== height) throw Error(height + ': box ' + span.getBoundingClientRect().height);
+          if (baseline(span) !== own) throw Error(height + ': baseline ' + baseline(span) + ', not ' + own);
+        }
+        // Updated in place: back to its own height, then into a taller line.
+        if (!player.updateRuns(el, 0, 0, [[0, 10, 'Hg', 0, 0, null, null]], [{}], null, null)) throw Error('made again');
+        if (span.style.lineHeight || span.getBoundingClientRect().height !== ownHeight || baseline(span) !== own) throw Error('not its own again: ' + span.outerHTML);
+        if (!player.updateRuns(el, 0, 0, [[0, 10, 'Hg', 0, 0, null, null, 40]], [{}], null, null)) throw Error('made again');
+        if (span.getBoundingClientRect().height !== 40 || baseline(span) !== own) throw Error('updated: ' + span.outerHTML);
         document.body.dataset.result = 'passed';
       } catch (e) { document.body.dataset.result = 'failed: ' + e.message; }
     </script>`);

@@ -1819,11 +1819,16 @@ fn window_api(
         WM_WINDOWPOSCHANGED => {
             if let Some(id) = data.window {
                 crate::app_window::state_changed(surface, id);
+                // Shown, hidden, minimized or restored: the app's state
+                // follows its own windows (the host never shows).
+                crate::system::lifecycle_changed(surface);
             }
             None
         }
         WM_DISPLAYCHANGE => {
+            crate::text::invalidate_rendering_params();
             crate::window_state::displays_changed(surface);
+            surface.invalidate();
             None
         }
         WM_CLOSE => {

@@ -62,6 +62,8 @@ pub(crate) struct InputIvars {
     paste_listens: Cell<bool>,
     /// A paste inserts its text (`pasteBehavior`).
     paste_inserts: Cell<bool>,
+    /// The largest pasted file read (`pasteMaxSize`; `None`: all).
+    paste_max_size: Cell<Option<u64>>,
     /// A bar of the app's follows the text area (its built-in bar, or one
     /// that watches it; `InputConfig::report_scroll`): its scrolling is
     /// reported.
@@ -103,6 +105,7 @@ impl Default for InputIvars {
             caret: Cell::new(Bounds::default()),
             paste_listens: Cell::new(false),
             paste_inserts: Cell::new(true),
+            paste_max_size: Cell::new(None),
             scroll_reports: Cell::new(false),
             scroll_reported: Cell::new(None),
             target: RefCell::default(),
@@ -513,7 +516,7 @@ fn pasting(view: &UIView, ivars: &InputIvars) -> bool {
 /// [`pasting`] from `board`.
 fn pasting_from(view: &UIView, ivars: &InputIvars, board: &objc2_ui_kit::UIPasteboard) -> bool {
     if ivars.paste_listens.get() {
-        let paste = crate::system::pasted(board);
+        let paste = crate::system::pasted(board, ivars.paste_max_size.get());
         report_paste(view, paste);
     }
     // SAFETY: a plain getter (no paste notice).
@@ -1313,8 +1316,14 @@ impl Input {
             TextAlign::Center => NSTextAlignment::Center,
             TextAlign::Right => NSTextAlignment::Right,
         };
-        // UIKit tints the caret and the selection with one color.
-        let tint = config.caret_color.or(config.selection_color).map(ui_color);
+        // UIKit tints the caret and the selection with one color. It also
+        // draws an input method's marked range and a caret of its own in
+        // the tint while composing, whatever `caretRectForPosition:` says:
+        // on a sink they would show over the editor's own drawing.
+        let tint = match is_sink(&config) {
+            true => Some(UIColor::clearColor()),
+            false => config.caret_color.or(config.selection_color).map(ui_color),
+        };
         match &self.editor {
             Editor::Line(field) => {
                 field.setFont(Some(&font));
@@ -1361,6 +1370,7 @@ impl Input {
         }
         if let Some(ivars) = ivars_of(self.editor_view()) {
             ivars.select_on_focus.set(config.select_text_on_focus);
+            ivars.paste_max_size.set(config.paste_max_size);
         }
         crate::mount::mirror(self.editor_view(), config.rtl);
         set_paste(
@@ -1705,6 +1715,12 @@ fn ui_color(color: Color) -> Retained<UIColor> {
     UIColor::colorWithRed_green_blue_alpha(r, g, b, a)
 }
 
+/// Whether an input draws no caret and no text: another view's sink for
+/// typed text and input methods (an editor's), which draws them itself.
+fn is_sink(config: &InputConfig) -> bool {
+    config.caret_hidden && config.style.color.is_transparent()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1743,5 +1759,22 @@ mod tests {
     #[test]
     fn a_missing_content_type_is_none() {
         assert!(ios17_content_type(c"UITextContentTypeThatDoesNotExist").is_none());
+    }
+
+    /// Only an input without a caret and with transparent text is a sink:
+    /// an app's `caret={false}` input keeps its selection's tint.
+    #[test]
+    // InputConfig is non-exhaustive outside nsh-core.
+    #[allow(clippy::field_reassign_with_default)]
+    fn only_an_input_without_caret_or_text_is_a_sink() {
+        let mut c = InputConfig::default();
+        c.caret_hidden = true;
+        c.style.color = Color::TRANSPARENT;
+        assert!(is_sink(&c));
+        c.style.color = Color::BLACK;
+        assert!(!is_sink(&c));
+        c.style.color = Color::TRANSPARENT;
+        c.caret_hidden = false;
+        assert!(!is_sink(&c));
     }
 }

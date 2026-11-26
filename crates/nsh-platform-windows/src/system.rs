@@ -91,7 +91,7 @@ use nsh_engine::{
 };
 use windows::{
     Win32::{
-        Foundation::{LPARAM, WPARAM},
+        Foundation::{HWND, LPARAM, WPARAM},
         Globalization::{
             GetLocaleInfoEx, GetUserDefaultLocaleName, GetUserDefaultUILanguage,
             GetUserPreferredUILanguages, LCIDToLocaleName, LOCALE_IFIRSTDAYOFWEEK, LOCALE_IMEASURE,
@@ -242,6 +242,7 @@ pub(crate) fn watch_environment(surface: &Rc<Surface>) {
 /// A system setting changed (`WM_SETTINGCHANGE`, `WM_THEMECHANGED`,
 /// `WM_SYSCOLORCHANGE`, `WM_DWMCOLORIZATIONCOLORCHANGED`).
 pub(crate) fn settings_changed(surface: &Rc<Surface>) {
+    crate::text::invalidate_rendering_params();
     refresh_accent();
     update(surface, settings());
     // The taskbar's colors may have changed: a template tray icon follows.
@@ -394,15 +395,26 @@ fn lifecycle(surface: &Surface, current: Lifecycle) -> Lifecycle {
     }
     // SAFETY: plain calls on a window handle.
     let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
-    // SAFETY: as above.
-    let shown = unsafe { IsWindowVisible(root).as_bool() && !IsIconic(root).as_bool() }
-        && !crate::presence::cloaked(root);
+    // The surface's root, or under window model v2 (whose host window
+    // never shows) one of the app's own windows ([`crate::app_window`]).
+    let shown = window_shown(root)
+        || crate::app_window::hwnds(surface)
+            .into_iter()
+            .any(window_shown);
     // A test's app runs as it does on screen whatever the screen shows (a
     // locked or remote session), so its tests see what they see unlocked.
     let seen = surface.testing() || crate::presence::screen_seen();
     lifecycle_of(shown, seen, crate::session::ending(), || {
         ACTIVE.with(Cell::get).unwrap_or_else(foreground_is_ours)
     })
+}
+
+/// Whether `window` is on screen: visible, not minimized, and not cloaked
+/// by the shell (on another virtual desktop).
+fn window_shown(window: HWND) -> bool {
+    // SAFETY: plain calls on a window handle.
+    (unsafe { IsWindowVisible(window).as_bool() && !IsIconic(window).as_bool() })
+        && !crate::presence::cloaked(window)
 }
 
 /// The app's state with its window `shown` (not minimized, hidden or on
@@ -866,7 +878,7 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
         // The app's address: this platform keeps none.
         | Command::SetAppUrl(_)
         | Command::PushAppUrl(_) => {}
-        other => log::debug!("windows: command {other:?} is not supported"),
+        other => nsh_core::platform::warn_unsupported("windows", &other),
     }
 }
 
@@ -1891,7 +1903,7 @@ impl Hosted for DialogItem {
         }
         if let (Some(footer), Some(card)) = (g.footer, g.cards.first()) {
             // The footer's band, its bottom corners the card's.
-            cx.push_clip_rounded(*card, [RADIUS; 4]);
+            cx.push_clip_rounded_shapes(*card, [RADIUS; 4]);
             // SAFETY: a COM call between BeginDraw and EndDraw.
             unsafe {
                 cx.dc.FillRectangle(
@@ -2346,6 +2358,11 @@ fn html_format() -> u32 {
     use windows::{Win32::System::DataExchange::RegisterClipboardFormatW, core::w};
     // SAFETY: a plain registration of a constant name.
     unsafe { RegisterClipboardFormatW(w!("HTML Format")) }
+}
+
+/// The clipboard's HTML fragment (`CF_HTML`), if it holds one.
+pub(crate) fn clipboard_html() -> Option<String> {
+    clipboard_bytes(html_format()).and_then(|bytes| clipboard::cf_html_fragment(&bytes))
 }
 
 /// Puts `bytes` on the clipboard as `format`, replacing what it holds.

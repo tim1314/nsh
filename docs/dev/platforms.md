@@ -96,6 +96,11 @@ whose scroll views move with the keyboard (arrows, Page Up / Down, Home, End) al
 after it starts each key's scroll, with the key's `nsh_core::scroll::KeyMove`: from End a list goes on to its real end
 through rows it has only estimated, and every other key lets go of that end (`docs/dev/scrolling-and-lists.md`).
 
+`Environment::reserved_regions` lists the parts of the surface the device reserves inside the safe area, in the
+surface's points (a fold that divides the display, a camera that shows through it), and is sent again when they
+change: iOS reads UIKit's reserved regions; other platforms leave the list empty until they have a source (Android's
+folding display features would map to `ReservedRegionKind::Division`).
+
 `Environment::platform` names a platform built outside NSH (`Some("miniprogram")`); NSH's own platforms leave it
 `None`. Apps read it as `platform.name` (TSX) and `platform_name()` (Rust, `nsh_core::prelude`), which is the OS's
 name (`ios`, `web`, ...) on NSH's own platforms (`Environment::platform_name`), and `platform.select(spec)` checks
@@ -118,7 +123,7 @@ false), and `Environment::clipboard_images` (`None` by default: as NSH's own bac
 terminal backends say `Some(false)`) is links of the app's schemes reaching it (off: `open_auth_session` fails at once
 unless the platform shows sign-in sessions itself). The Mini Program platform turns the first two off; as it hands the
 app no links of its schemes, it should say `Some(false)` for the third. The other services follow the same pattern
-(`screen_color`, `file_requests`, `speech`, `notifications`, `audio`: what the platform answers).
+(`screen_color`, `file_requests`, `notifications`, `audio`: what the platform answers).
 
 ## WebAssembly hosts
 

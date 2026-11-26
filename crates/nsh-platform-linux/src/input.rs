@@ -550,7 +550,7 @@ fn set_cursor(view: &NshView, over_link: bool) {
 /// handled happened in.
 /// Simulated input goes to the window whose root view is `root` (`None`:
 /// the surface's), as a real event in it would.
-#[cfg(feature = "dev")]
+#[cfg(any(test, feature = "dev"))]
 pub(crate) fn set_event_root(surface: &Surface, root: Option<NshView>) {
     *surface.input.window_root.borrow_mut() = root;
 }
@@ -2172,6 +2172,7 @@ pub(crate) fn modifiers(state: gdk::ModifierType) -> nsh_core::keymap::Modifiers
         alt: state.contains(gdk::ModifierType::ALT_MASK),
         shift: state.contains(gdk::ModifierType::SHIFT_MASK),
         cmd: state.contains(gdk::ModifierType::SUPER_MASK),
+        alt_graph: false,
     }
 }
 
@@ -2905,11 +2906,21 @@ fn wheel_input(
             };
             *input.latch.borrow_mut() = Some((view.clone(), horizontal, time));
             let (dx, dy) = if notches {
-                let s = view.state();
-                (
-                    dx * notch(s.frame.size.width.0),
-                    dy * notch(s.frame.size.height.0),
-                )
+                // A notch is a line, GtkScrolledWindow's length for the
+                // view; a `smoothWheel` view glides it, and
+                // `wheelLineHeight` sets its own.
+                let line = {
+                    let s = view.state();
+                    point(
+                        Points(notch(s.frame.size.width.0)),
+                        Points(notch(s.frame.size.height.0)),
+                    )
+                };
+                match crate::scroll::wheel_notch(surface, &view, dx * line.x.0, dy * line.y.0, line)
+                {
+                    Some(d) => d,
+                    None => return true,
+                }
             } else {
                 (dx, dy)
             };
@@ -3030,14 +3041,14 @@ fn touchpad_hold(surface: &Rc<Surface>, phase: gdk::TouchpadGesturePhase, x: f32
     true
 }
 
-/// The closest file-drop listener under the pointer, within its modal root.
-pub(crate) fn file_drop_target(surface: &Surface, x: f32, y: f32) -> Option<NshView> {
-    let mut view = pick(&event_root(surface), x, y)?.view;
+/// The closest file-drop listener under `x`, `y` in `root`, within its modal root.
+pub(crate) fn file_drop_target_in(root: &NshView, x: f32, y: f32) -> Option<NshView> {
+    let mut view = pick(root, x, y)?.view;
     loop {
         if view.state().events.contains(EventKind::FileDrop) {
             return Some(view);
         }
-        if view.kind() == ViewKind::Modal || view.id() == ROOT_ID {
+        if view.kind() == ViewKind::Modal || view.id() == root.id() || view.id() == ROOT_ID {
             return None;
         }
         view = view.parent_view()?;

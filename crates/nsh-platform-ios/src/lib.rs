@@ -91,11 +91,12 @@ mod scroll_watch;
 mod selectable_view;
 mod shader;
 mod share;
+mod sight;
 mod split;
 mod state_words;
-// Sound (`Sound`, `AudioPlayer`), the Speech framework's recognizer and the
-// notification center, shared with macOS.
-use nsh_platform_apple::{audio, notifications, speech};
+// Sound (`Sound`, `AudioPlayer`) and the notification center, shared with
+// macOS.
+use nsh_platform_apple::{audio, notifications};
 mod surface;
 #[cfg(feature = "dev")]
 mod synth;

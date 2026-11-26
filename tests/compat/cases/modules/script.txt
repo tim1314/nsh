@@ -41,8 +41,10 @@ tap id:case-mod-android
 expect Android: false
 expect Exit: function
 expect Calls: not called
+expect Progress: not called
 tap id:call
 expect Calls: done, remove function
+expect Progress: done, stop function
 covers [nsh/mobile] BackHandler
 # mod-clipboard
 tap id:case-mod-clipboard
@@ -130,16 +132,6 @@ expect Settings: not opened
 tap id:settings
 expect Settings: rejected ERR_FEATURE_UNAVAILABLE_ON_PLATFORM
 covers [nsh/mobile] AppSettings
-# mod-speech
-tap id:case-mod-speech
-# nothing recognizes speech there: available() resolves false and a session
-# ends at once with "unavailable"; a lang that is no tag throws a RangeError.
-expect Available: false
-expect Speech: not started
-tap id:start
-expect Refused: threw RangeError
-expect Speech: end unavailable "" true
-covers [nsh] Speech
 # mod-audio
 tap id:case-mod-audio
 # nothing plays sound there: available() resolves false, a sound's load
@@ -414,4 +406,5 @@ covers [nsh] setFpsMode
 tap id:case-mod-perf-stats
 # no stats until the monitor measured a second.
 expect Fps: none
+expect Memory: none
 covers [nsh] perfStats

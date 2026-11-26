@@ -7,10 +7,11 @@ group: delivery
 
 # 沙箱与能力
 
-用 Rust 编写的应用是编译进发布它的应用中的原生代码，和该应用的其余部分一样，以它的信任运行；它对 NSH 服务的调用（`fetch`、图片、
-web view、状态栏）和 TSX 一样经过同样的原生检查，受宿主授予的范围约束。应用运行的 TSX 和 JavaScript（它自己的，或它下载的
-[签名包](./signed-packages.md)）在每个视图一个的 QuickJS VM 中运行，它们在 VM 之外能做的一切都要经过 NSH 的原生运行时。因此，
-你可以在宿主应用制定的规则下运行并非自己编写的代码，例如第三方小程序或下载的更新：
+沙箱让宿主应用可以在自己制定的规则下运行别人写的代码，例如第三方小程序或下载的更新。
+
+应用运行的 TSX 和 JavaScript（它自己的，或它下载的[签名包](./signed-packages.md)）在每个视图一个的 QuickJS VM 中运行，它们在 VM
+之外能做的一切都要经过 NSH 的原生运行时。Rust 代码不同：它是编译进应用的原生代码，以应用的信任运行；它对 NSH 服务的调用
+（`fetch`、图片、web view、状态栏）仍和 TSX 一样经过同样的原生检查，受宿主授予的范围约束。运行时提供三层保护：
 
 - **限制（Limits）** 约束单个应用可使用的内存、时间和原生资源。
 - **加固（Hardening）** 在 release 构建中移除所有把字符串变成代码的途径。
@@ -200,6 +201,7 @@ Web 上它沿用页面的协议，按补全后的 URL 检查；原生应用没�
 | `hosts` | `string[]` | [web view](./web-view-and-video.md) 可以显示和导航到的主机（`http` 和 `https`）。没有 `webview` 时，应用完全不能显示网页。 |
 | `input` | `boolean` | web view 的 ref 可以向页面发送可信输入（[`sendInput`](./web-view-and-video.md#像用户一样输入)）。只有声明了才会授予，没有 `"capabilities"` 的应用也不例外。 |
 | `media` | `string[]` | 网页可以通过 `getUserMedia` 采集的媒体：`"microphone"`、`"camera"`。只有声明了才会授予，没有 `"capabilities"` 的应用也不例外。 |
+| `runtimeOrigin` | `boolean` | web view 的 `allowOrigin` 可以在应用运行时为这个 web view 增加一个可显示的源（[`allowOrigin`](../elements/web-view.md)）。只有声明了才会授予，没有 `"capabilities"` 的应用也不例外。 |
 
 web view 内的顶层导航也会在加载前由平台的导航代理检查。页面自身的子资源（脚本、图片、XHR）属于网页内容自己的事，
 不做检查。`about:blank` 和内联 HTML（`html`）只要求 web view 被授予即可：`"webview": { "hosts": [] }`
@@ -240,13 +242,15 @@ blob（`blob:null/…`），都不允许。所有平台的检查方式相同。
 
 `"picker": true` 允许应用显示系统的照片选择器（[`Picker`](../modules/nsh.md#picker)）：由用户决定哪些内容交给应用。
 
+开启了 `nsh-extra` 的 [`Photos`](./nshm.md#photos) 的应用，也由它授予相册：读取最近的照片、它们的缩略图和照片本身。用户允许的范围对整个应用有效，所以由这项能力决定哪些代码能拿到照片。
+
 ### `share`
 
 `"share": true` 允许应用显示系统的分享面板（[`Share`](../modules/nsh.md#share)）：由用户决定内容发往哪里。分享的文件还需要能在 `fs.read` 下读取。
 
 ### `speech`
 
-`"speech": true` 允许应用识别用户说的话（[`Speech`](../modules/nsh.md#speech)）：使用麦克风和系统的语音识别器，转写文本交给应用。系统仍会向用户请求一次权限。
+`"speech": true` 允许应用识别用户说的话（`nsh-extra` 的 [`Speech`](./nshm.md#speech)）：使用麦克风和系统的语音识别器，转写文本交给应用。系统仍会向用户请求一次权限。
 
 ### `audio`
 
@@ -325,6 +329,7 @@ if (host.available()) {
 | 声音 | `Sound.load` reject、`new AudioPlayer` 抛出 `ERR_ACCESS_DENIED`，`permission` 为 `"audio"`，`resource` 为音源；不读取也不播放任何内容。 |
 | 语音 | `Speech.start` 抛出 `ERR_ACCESS_DENIED`，`permission` 为 `"speech"`，`resource` 为 `""`；麦克风不会打开。 |
 | 通知 | `Notifications` 的函数 reject 或抛出 `ERR_ACCESS_DENIED`，`permission` 为 `"notifications"`，`resource` 为 `""`；不会显示任何东西。 |
+| 相册 | `nsh-extra` 的 `Photos` 除 `access()` 外的函数 reject 或抛出 `ERR_ACCESS_DENIED`，`permission` 为 `"picker"`，`resource` 为 `""`；不读取相册，也不询问用户。 |
 | 推送 | `nsh-extra` 的 `Push` 除 `available()` 外的函数 reject 或抛出 `ERR_ACCESS_DENIED`，`permission` 为 `"notifications"`，`resource` 为 `""`；设备不会注册，token 和投递都不会到达应用。 |
 | `openUrl` | Promise 以 `ERR_ACCESS_DENIED` 被 reject，`permission` 为 `"openUrl"`，`resource` 为该 URL；不会打开任何东西。 |
 | 宿主调用 | `host.call` 以 `ERR_ACCESS_DENIED` 被 reject，`permission` 为 `"host"`，`resource` 为函数名（`host.post` 抛出同样的错误）；调用不会到达宿主。 |

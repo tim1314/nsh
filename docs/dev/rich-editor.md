@@ -179,9 +179,12 @@ and input methods. The sink is the editor's one stop of Tab; the content box tak
 (`focusable(false)`), and a press in it focuses the sink. The keyboard is the sink's, so the editor's
 `input_accessory` (`inputAccessoryViewID`) is set on the sink, as an `Input`'s. A node selection of a block atom has no caret: the sink is at the node's box, where a platform
 that scrolls a field into view as it focuses it (a browser) finds it, and scrolling the selection into view
-(`scroll_into_view`) brings the node in whole, as ProseMirror scrolls a node selection's DOM node. Typed text goes to plugins' `handle_text_input` (input rules), else is inserted with the stored
+(`scroll_into_view`) brings the node in whole, as ProseMirror scrolls a node selection's DOM node. The sink's changes are replayed at the caret as the code `Editor`'s are (`sink_text.rs`), and a caret the
+platform moves in the sink without a key (an input method that puts its caret between the brackets it typed) moves
+the editor's by as much, within the textblock and over text the document shows the same way. Typed text goes to plugins' `handle_text_input` (input rules), else is inserted with the stored
 marks (origin `Input`). While an input method composes, its text shows in the line at the caret with the block's
-typography, and the document waits; the commit is one transaction tagged with the composition's id (`composition`
+typography, and the document waits; the caret is drawn after it, as a native text view draws it after its marked
+text, while the sink (where the candidates open) stays at its start. The commit is one transaction tagged with the composition's id (`composition`
 meta, which the history groups). `RichEditorEvent::CompositionChange(bool)` (Rust
 `.on_composition_change`, JS `onCompositionChange({ composing })`) reports each view's start/end transitions,
 including cancellation, after its session flag, held input and composition signal are updated. Updates within an
@@ -253,9 +256,10 @@ children do. The app places them in the content box's points, which `nodeRect(po
 
 Tables (`view/table.rs`): the tree walk flattens a table (a node whose spec's `extra.tableRole` is `"table"`): its
 cells, row after row, are the table's children; rows have no view. The table's block is a grid (`grid()`): a column
-per column of its `TableMap`, as wide as the cells' `colwidth` (at least `cellMinWidth`), else `minmax(cellMinWidth,
-1fr)`; a row per row, at least its `height`, else `auto`; a table whose columns all have widths is as wide as they are
-(`self-start`), wider than the editor it overflows. Each cell is placed at its map slots (`col-start` / `col-end` /
+per column of its `TableMap`. The grid measures the rendered cells, including inline node views, with
+`fit-content(20rem)` for each automatic track. A saved `colwidth` or live resize sets a track to that width, at least
+`cellMinWidth`. Each row fits its content and is at least its saved `height`. The horizontal scroll view gives the
+grid room to measure its contents and scrolls when it is wider than the editor. Each cell is placed at its map slots (`col-start` / `col-end` /
 `row-start` / `row-end`, so spans and rowspans need no row views) and takes its node part as other blocks do. The
 default look is the theme's: the table's top and left borders and each cell's right and bottom ones (`border`, 1
 point), cells padded 8 × 4, header cells on `muted`. A cell selection paints no text boxes: each selected cell holds a
@@ -269,11 +273,11 @@ cell, the keymaps' `arrow` leaves the table); Tab and Shift-Tab are the `table` 
 right border and each row's bottom border (`resizable`; the last column's when `lastColumnResizable`), the column- or
 row-resize cursor, its line (`tableResizeHandle`, the theme's `primary`) on hover and while dragged; a drag previews
 the new size in the grid's tracks and commits `setColumnWidth` / `setRowHeight` once on release (at least
-`cellMinWidth`, rows 16 points). The table the selection is in has grips (a bar of the `tableGrip` part, the theme's
-`muted-foreground`) centered on its top border over each column and on its left border beside each row: a press
-selects the column or row (a cell selection), a drag on desktops shows the drop line (`tableDropIndicator`, `primary`)
-and moves it with `moveTableColumn` / `moveTableRow` on release. Table gestures come before the content box's
-selecting (`Rv::table_target` at the press).
+`cellMinWidth`, rows 16 points). The current cell gets a column grip on the table's top border and a row grip
+on its left border (bars of the `tableGrip` part, the theme's `muted-foreground`). The hovered cell takes precedence
+over the selection. In a scrolling table the viewport clips the column grip and its left edge anchors the row grip. A press selects the column or row (a cell selection). A drag on desktops shows the drop line
+(`tableDropIndicator`, `primary`) and moves the column or row with `moveTableColumn` / `moveTableRow` on release.
+Table gestures come before the content box's selecting (`Rv::table_target` at the press).
 
 Each table's handles and grips are a region of their own (`table_controls`), placed from that table's layout alone
 (`Rv::table_layout`). Every block reports its frame in an event of its own, so a region over all the tables, run again
@@ -304,6 +308,12 @@ editor.dispatchTransaction = (tr) => editor.applyTransaction(tr);
   `toggleMark(..)`, `history(..)`, `markRule(..)`, ...), resolved against the editor's schema when they run or the
   editor is made (`commands.rs`, `plugins.rs`). `chain` runs commands on the states each leaves and dispatches their
   steps as one transaction; `first` is ProseMirror's `chainCommands`.
+- `insertContent(content, format?)` (the command object and the session method) is not the registry's
+  `insertContentAt`: plain text is read by `slice_from_text`, Markdown and JSON become a `Slice::max_open`, and all
+  of them go through `Selection::replace`, so a paragraph produced by a document format splices into the text around
+  the caret while structure that cannot fit stays in blocks. An HTML string is the exception: it is parsed by
+  `DomParser::parse_insert_fragment` and inserted with Tiptap's `insertContent` algorithm, since HTML can represent
+  bare inline content and Tiptap's string input is HTML. `pasteHTML` / `pasteText` remain the paste algorithms.
 - `RichEditorPlugin` (`#[class]`) is a plugin whose behavior is the app's. Its callbacks live in a thread-local table
   of the engine thread (`HookRef`), since the kernel's plugins and the session are `Send + Sync`. Captured keys are a
   native keymap consumed while `capturing` is set, reported to JS with `post`; decorations are data a transaction

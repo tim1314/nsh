@@ -83,6 +83,8 @@ final class TouchTracker {
                 return true;
             }
             case MotionEvent.ACTION_MOVE: {
+                mounter.touchMoved(e.getRawX(), e.getRawY(),
+                        android.view.ViewConfiguration.get(root.getContext()).getScaledTouchSlop());
                 if (tracked.isEmpty()) return false;
                 if (!update(e)) return false;
                 int[] all = new int[tracked.size()];
@@ -94,6 +96,7 @@ final class TouchTracker {
             }
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_POINTER_UP: {
+                if (action == MotionEvent.ACTION_UP) mounter.touchUp(true);
                 int pointer = e.getPointerId(e.getActionIndex());
                 for (int i = 0; i < tracked.size(); i++) {
                     Tracked t = tracked.get(i);
@@ -107,6 +110,7 @@ final class TouchTracker {
                 return false;
             }
             case MotionEvent.ACTION_CANCEL:
+                mounter.touchUp(false);
                 cancelAll();
                 return false;
             default:
@@ -437,7 +441,7 @@ final class TouchTracker {
     }
 
     /** The innermost node view that can take a touch at ({@code x}, {@code y}) of {@code v}. */
-    private static View deepest(View v, float x, float y) {
+    static View deepest(View v, float x, float y) {
         int pointerEvents = v instanceof Box ? ((Box) v).pointerEvents
                 : v instanceof InputBox ? ((InputBox) v).pointerEvents : 0;
         if (pointerEvents == 1 || v.getVisibility() != View.VISIBLE) return null;

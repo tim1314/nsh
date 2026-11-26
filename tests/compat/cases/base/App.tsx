@@ -26,6 +26,7 @@ import BaseDockRenderHandle from "./base-dock-render-handle";
 import BaseDockToolbar from "./base-dock-toolbar";
 import BaseSplitView from "./base-split-view";
 import BaseEditor from "./base-editor";
+import BaseEditorFonts from "./base-editor-fonts";
 import BaseHoverCard from "./base-hover-card";
 import BaseLink from "./base-link";
 import BaseNavPage from "./base-nav-page";
@@ -70,6 +71,7 @@ import BaseTextView from "./base-text-view";
 import BaseTimeField from "./base-time-field";
 import BaseToast from "./base-toast";
 import BaseToggle from "./base-toggle";
+import BaseTitleBar from "./base-title-bar";
 import BaseToolbar from "./base-toolbar";
 import BaseTree from "./base-tree";
 import BaseTreeSlots from "./base-tree-slots";
@@ -96,6 +98,7 @@ const cases: Record<string, () => JSX.Element> = {
   "base-dock-toolbar": BaseDockToolbar,
   "base-split-view": BaseSplitView,
   "base-editor": BaseEditor,
+  "base-editor-fonts": BaseEditorFonts,
   "base-hover-card": BaseHoverCard,
   "base-link": BaseLink,
   "base-nav-page": BaseNavPage,
@@ -128,6 +131,7 @@ const cases: Record<string, () => JSX.Element> = {
   "base-tabs": BaseTabs,
   "base-tabs-orientation": BaseTabsOrientation,
   "base-toggle": BaseToggle,
+  "base-title-bar": BaseTitleBar,
   "base-toolbar": BaseToolbar,
   "base-tree": BaseTree,
   "base-tree-slots": BaseTreeSlots,

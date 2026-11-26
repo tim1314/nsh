@@ -303,7 +303,7 @@ pub(crate) struct Apk<'a> {
     pub(crate) signing: Signing,
 }
 
-/// What `nsh package --target android` writes.
+/// What `nsh package` writes besides its default (`--format`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Format {
     /// An APK: installed directly (`adb install`, sideloading).
@@ -312,6 +312,13 @@ pub(crate) enum Format {
     /// An Android App Bundle: uploaded to Google Play, which builds the
     /// APKs each device installs.
     Aab,
+    /// Linux: an AppImage, besides the directory and `.tar.gz`.
+    Appimage,
+    /// Linux: a Flatpak manifest (Flathub) and, with `flatpak-builder`, a
+    /// `.flatpak` bundle, besides the directory and `.tar.gz`.
+    Flatpak,
+    /// Windows: an MSIX package, for the Microsoft Store (`msix.rs`).
+    Msix,
 }
 
 impl Format {
@@ -319,7 +326,15 @@ impl Format {
         match self {
             Format::Apk => "apk",
             Format::Aab => "aab",
+            Format::Appimage => "AppImage",
+            Format::Flatpak => "flatpak",
+            Format::Msix => "msix",
         }
+    }
+
+    /// A Linux format (`--target linux`).
+    pub(crate) fn is_linux(self) -> bool {
+        matches!(self, Format::Appimage | Format::Flatpak)
     }
 }
 
@@ -1738,6 +1753,27 @@ pub(crate) fn install(
     }
 }
 
+/// The `adb` arguments that start `component` (`<package>/<activity>`) for a
+/// development run (`nsh run`, `nsh test`): `-S` stops the previous run's
+/// process first, and `--activity-clear-task` (with the `NEW_TASK` flag
+/// `am start` always sets) starts the activity in an emptied task.
+/// Without it, an activity of another app that the previous run left on top
+/// of the task (the system's settings the app opened, a share sheet's
+/// target) is what comes to the front, and the new run's activity never
+/// starts. A development run keeps no state in the task to lose: the
+/// previous process is stopped either way.
+pub(crate) fn dev_start(component: &str) -> Vec<&str> {
+    vec![
+        "shell",
+        "am",
+        "start",
+        "-S",
+        "--activity-clear-task",
+        "-n",
+        component,
+    ]
+}
+
 pub(crate) fn adb(sdk: &Sdk, serial: &str, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new(sdk.adb())
         .args(["-s", serial])
@@ -1756,7 +1792,7 @@ pub(crate) fn adb(sdk: &Sdk, serial: &str, args: &[&str]) -> anyhow::Result<Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{AdbDevice, Chosen, Wanted, choose_device, parse_devices};
+    use super::{AdbDevice, Chosen, Wanted, choose_device, dev_start, parse_devices};
 
     fn devices(list: &[(&str, &str)]) -> Vec<AdbDevice> {
         list.iter()
@@ -1776,6 +1812,25 @@ mod tests {
 
     fn error(result: anyhow::Result<Chosen>) -> String {
         result.err().map(|e| e.to_string()).unwrap_or_default()
+    }
+
+    /// A development run stops the previous process and starts its
+    /// activity in an emptied task, not under what another app left on top
+    /// of it.
+    #[test]
+    fn dev_start_clears_the_task() {
+        assert_eq!(
+            dev_start("com.example/com.longbridge.nsh.AppActivity"),
+            [
+                "shell",
+                "am",
+                "start",
+                "-S",
+                "--activity-clear-task",
+                "-n",
+                "com.example/com.longbridge.nsh.AppActivity",
+            ]
+        );
     }
 
     /// `adb devices` lists a device per line after its header, with the

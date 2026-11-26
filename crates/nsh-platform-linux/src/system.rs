@@ -35,14 +35,15 @@
 //! - the screen reader: the AT-SPI bus's `ScreenReaderEnabled`;
 //! - the OS version: the kernel's major and minor version (distributions
 //!   number their releases in incomparable ways, some not at all);
-//! - the app's state, from GDK's toplevel states, followed on the root's
-//!   map and unmap and its toplevel's `state` ([`lifecycle_changed`]):
-//!   background while the surface's window is not shown (the root
-//!   unmapped, the window minimized, or suspended: on another workspace or
-//!   covered, where the compositor says so), active while one of the
-//!   app's windows has the focus, inactive otherwise; background too from
-//!   the moment the session may end (signing out, shutting down:
-//!   [`crate::session`]);
+//! - the app's state, from GDK's toplevel states, followed on the map and
+//!   unmap of the root and of the app's own windows and on their
+//!   toplevels' `state` ([`lifecycle_changed`]): background while neither
+//!   the surface's window nor one of the app's own windows is shown (the
+//!   host's window never shows under the desktop window model; a window
+//!   unmapped, minimized, or suspended: on another workspace or covered,
+//!   where the compositor says so), active while one of the app's windows
+//!   has the focus, inactive otherwise; background too from the moment the
+//!   session may end (signing out, shutting down: [`crate::session`]);
 //! - the wake count (`wakeCount()`): one more for every surface when
 //!   systemd's `logind` reports the end of a sleep
 //!   (`org.freedesktop.login1.Manager`'s `PrepareForSleep` with `false`,
@@ -408,16 +409,20 @@ pub(crate) fn lifecycle_changed() {
     }
 }
 
-/// The app's state as `surface` sees it.
-fn lifecycle(surface: &Surface) -> Lifecycle {
-    let hidden = gdk::ToplevelState::MINIMIZED | gdk::ToplevelState::SUSPENDED;
-    let shown = surface.root.is_mapped()
-        && surface
-            .root
-            .native()
-            .and_then(|n| toplevel_state(&n))
-            .is_none_or(|s| !s.intersects(hidden));
+/// The app's state as `surface` sees it: shown while its root shows or,
+/// as the host's window never shows under the desktop window model, while
+/// one of the app's own windows does ([`crate::window::any_shown`]).
+pub(crate) fn lifecycle(surface: &Surface) -> Lifecycle {
+    let shown = surface.root.is_mapped() && surface.root.native().is_none_or(|n| not_hidden(&n))
+        || crate::window::any_shown(surface);
     lifecycle_of(shown, crate::session::ending(), app_focused)
+}
+
+/// Whether `native`'s toplevel is neither minimized nor suspended (or not
+/// realized yet).
+pub(crate) fn not_hidden(native: &gtk::Native) -> bool {
+    let hidden = gdk::ToplevelState::MINIMIZED | gdk::ToplevelState::SUSPENDED;
+    toplevel_state(native).is_none_or(|s| !s.intersects(hidden))
 }
 
 /// Whether one of the app's windows has the focus.
@@ -471,7 +476,8 @@ fn update(surface: &Surface, appearance: Appearance) {
     env.reduce_motion = appearance.reduce_motion;
     env.rtl = appearance.rtl;
     env.screen_reader = appearance.screen_reader;
-    env.pixel_ratio = pixel_ratio(&surface.root);
+    env.pixel_ratio = crate::window::primary(surface)
+        .map_or_else(|| pixel_ratio(&surface.root), |(_, ratio)| ratio);
     env.os_version = OS_VERSION.with(|v| *v);
     env.safe_area = Edges::default();
     env.keyboard_height = px(0.0);
@@ -556,8 +562,33 @@ fn interface_scheme(settings: &gtk::Settings) -> Option<String> {
     glib::EnumValue::from_value(&value).map(|(_, v)| v.nick().to_owned())
 }
 
+/// Tells the engine the window size and scale the app sees (`windowSize()`,
+/// `pixelRatio()`, the size classes): its primary window's
+/// ([`crate::window::primary`]), as the user resizes it, else the
+/// surface's (an embedded view, or a host whose app shows no window). The
+/// host's own window never shows under the desktop window model: reporting
+/// it would lay the app out for a window nobody sees.
+pub(crate) fn window_environment(surface: &Surface) {
+    let (size, ratio) = crate::window::primary(surface)
+        .unwrap_or_else(|| (surface.root.state().frame.size, pixel_ratio(&surface.root)));
+    let mut env = surface.environment.get();
+    if env.window == size && env.pixel_ratio == ratio {
+        return;
+    }
+    let rescaled = env.pixel_ratio != ratio;
+    env.window = size;
+    env.pixel_ratio = ratio;
+    // Only the size and scale: the appearance stays as it was applied,
+    // which a live resize would otherwise apply again on every step.
+    surface.environment.set(env);
+    surface.control(|c| c.set_environment(env));
+    if rescaled {
+        crate::image::rescaled(surface);
+    }
+}
+
 /// Device pixels per point of `root`'s window.
-fn pixel_ratio(root: &NshView) -> f32 {
+pub(crate) fn pixel_ratio(root: &NshView) -> f32 {
     root.native()
         .and_then(|n| n.surface())
         .map_or(root.scale_factor() as f64, |s| s.scale()) as f32
@@ -929,7 +960,7 @@ pub(crate) fn command(surface: &Rc<Surface>, _id: NodeId, command: &Command) {
         // The app's address: this platform keeps none.
         | Command::SetAppUrl(_)
         | Command::PushAppUrl(_) => {}
-        other => log::debug!("linux: command {other:?} is not supported"),
+        other => nsh_core::platform::warn_unsupported("linux", &other),
     }
 }
 
@@ -1806,6 +1837,13 @@ pub(crate) fn set_appearance(surface: &Rc<Surface>, appearance: nsh_core::platfo
     if surface.appearance.replace(appearance) != appearance {
         update(surface, self::appearance());
     }
+}
+
+/// Tests: `surface` follows the app's state ([`lifecycle_changed`]), as
+/// [`watch_environment`] makes it without installing the system watchers.
+#[cfg(test)]
+pub(crate) fn follow_lifecycle_for_test(surface: &Rc<Surface>) {
+    SYSTEM.with(|s| s.borrow_mut().surfaces.push(Rc::downgrade(surface)));
 }
 
 /// Tests: the system's color scheme is now dark (or light), as the

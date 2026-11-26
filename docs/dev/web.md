@@ -242,8 +242,29 @@ A published app's runtime holds only what the app uses, and what only later scre
 from it. `nsh package --target web` makes these modules from `nsh-browser.wasm` (feature `linkable`) without a
 Rust toolchain or a linker; how is in the module docs of `crates/nsh-cli/src/web/`. A runtime wasm-bindgen ran on
 (`crates/nsh-cli/src/bindgen.rs`) is published whole (`web::link`): wasm-bindgen rewrites the module and keeps the
-`linking` and `reloc.*` sections of the one it read, which no longer describe it. A runtime with every
+`linking` and `reloc.*` sections of the one it read, which no longer describe it, so it has no side modules. A
+Rust app's runtime is pruned before wasm-bindgen instead (`RustApp::without_unused_gates`): when no code
+reachable from its other exports makes a component by name (`ComponentElement::by_name`, found by the symbol
+`nsh_core::element::__private::BY_NAME_MARKER` names: the stand-in `make` of such an element, kept by a test in
+`nsh-core`), the `nsh_part_*` gates go with the code only they reach; when one does, every gate
+stays, as a part is loaded when its first component is made. The `nsh_feature_shader` gate (naga's GLSL ES
+back end) goes the same way when no code reachable from the other exports (and the part gates that stay) makes a shader view
+or a shader transition (`nsh_core::element::__private::SHADER_USE_MARKER`, the function every `shader()`-like
+constructor and `transition_shader` calls, kept by a test in `nsh-core`). A runtime with every
 component (the website's, the development host's) serves every app.
+
+A shared runtime (`nsh package --shared-runtime`; not for a Rust app or one with wasm-bindgen glue, which fails) splits whatever the app uses: its main module
+keeps every export but the gates and every gate is lazy (`web::shared_split`), so the main module and the side
+modules are the same bytes, and names, for every app on one runtime. The gates the entry needs (`GatePlan::main`)
+are the page's `entrySides`: `web/start.js` loads them with `player.loadSides` before `runModule`, and the head's
+script requests them, and the side modules they import from (`web::side_urls`), with the main module, which
+`compileSide` takes through `createPlayer`'s `prefetched`. Gates registered before the app starts are what a main
+module's would be (`nsh_after_gate` only pumps then; the engine reads the UI sets and the realm the native modules'
+namespaces as the app starts).
+
+Every copy of `nsh.js` on a page numbers its players with one counter on the document (`Symbol.for("nsh.players")`):
+the views' own style rules (`nsh-p<player>-i<id>`) and DOM ids of two apps whose runtimes are different files do not
+collide, as each copy's sheets apply to the whole document.
 
 What an app uses is `Bundle::native_use` (`natives.rs`, `native-pipeline.md`). A namespace import read only by
 names the code spells (`import * as base from "nsh/base"; base.EmojiPicker`, the way an app reads an export
@@ -629,6 +650,10 @@ Each run is a span placed at its position. The characters a line broke at (the s
 break's newline: a run's `after`) stand between the spans as text nodes (`Player.lineBreaks`), so a text's
 `textContent` and its `aria-label` read as the text was written ("it now brings", never "it nowbrings"), which is
 what search engines and screen readers get; beside absolutely placed spans that whitespace collapses and shows nothing.
+A run whose line is taller or shorter than its font (a line height the text sets, a taller run beside it: `Run::line_height`)
+gets a `line-height` of its line and moves up by the half-leading the DOM adds (`Player.placeRun`, measured per font
+and height on the metrics probe, `lineBaseline`, as the browser snaps it), so its baseline stays where layout put it
+and a selection highlights the whole line, as on a browser's own text, not the font's height.
 
 ## Styles as classes
 
@@ -960,7 +985,12 @@ browsers' touches into what phones report:
   the area's texts on one row (their boxes overlap vertically: a table's cells) with a tab instead of a newline, joins
   a text whose props have `continuesText` (`ViewProps::continues_text`: a wrapped line's later part) to the one
   before it with nothing, and gives attachments (U+FFFC) as their copy texts (`copyText`, sent with the text) or
-  leaves them out, as `SelectionModel::text` does.
+  leaves them out, as `SelectionModel::text` does. The area's `onSelectionChange` (`areaSelectionChanged`, on the
+  document's `selectionchange`) carries that text, where it starts and `bounds`, the box around the selected
+  characters in the area as of the event (`selectionBounds`: the client rects of the selected parts of the runs a
+  copy takes, united, in the area's own points), to which the core adds `pageBounds`. It is reported when the text or
+  the box changed (the same text selected elsewhere); the layout moving the selected text after a batch is not
+  looked for, which would read the page's layout after every batch.
 - **Elsewhere**: no page context menu or iOS callout outside fields and selectable text; a mouse drag selects only in
   selectable text and fields; overflow is `clip`, never `hidden`, so that the browser cannot scroll a box the core
   laid out to show a focused field.
@@ -1142,9 +1172,22 @@ before the props that name its tag: `retag` adds the old element's listeners to 
 browser's margins, fonts, colors, underlines and list markers off those tags, so the view looks as a `div` does. A
 link gets `href` and is not draggable; a plain click on it stays the app's (`Link`'s press; the root's `click`
 listener prevents the browser's navigation), a click with a modifier key or the middle button opens `href` as the
-browser does, and a context menu on it is the browser's (open in a new tab, copy the link) unless the link or a view
+browser does and starts no press (`pointerDown`: the link does not open it again, nor hear `onOpen` or `onPress`),
+and a context menu on it is the browser's (open in a new tab, copy the link) unless the link or a view
 in it listens for `onContextMenu` (`contextMenu`, where the runtime otherwise prevents the browser's menu). The other
 backends store `web_element` and draw nothing differently.
+
+**Links of text.** A link of a text (a nested `<Text>` taking presses, `AttributedText::links`) whose span has an
+`href` (`AttributedText::link_hrefs`: `TextView` gives each of its links its URL, as `Link` gives its view its `href`)
+is an `a` inside its run (`fillRun`, class `nsh-link`; the link record of the text item is `[node, events, href]`)
+when its address is one a browser opens from a page (`textLinkAddress`: `http:`, `https:`, `mailto:`, `tel:` and
+paths, under the site's base as a `Link`'s `href`, `linkHref`); an `#anchor` of the document and any other scheme (an
+app's own routes, `javascript:`) stay a span, pressed as before. The `a` keeps its run's shaping, bidi order, color
+and decoration (a rule of the runtime's stylesheet takes the browser's off `a.nsh-link`), is not draggable (a drag
+selects its characters) and keeps `tabindex="-1"`, as Tab passes the web's links of text. Its clicks are a `Link`'s
+(`LINK_SELECTOR`): a plain click presses the link through its text (`linkPress`), a click with a modifier key or the
+middle button is the browser's alone; its context menu is the browser's unless its text listens for `onContextMenu`.
+`text-browser.test.mjs` checks that the `a` sits where the span would.
 
 **The page's head.** `nsh/web` is a native module like the platform modules (`nsh_core::js::NATIVE_MODULES`): the
 QuickJS hosts serve `nsh-js`'s `web_page.rs` (`Head` renders nothing), the browser runtime its

@@ -478,18 +478,25 @@ fn svg_drawing(
     shown
 }
 
+/// A shader view of `tag`, noting that the app uses shaders
+/// ([`crate::shader::USE_MARKER`]).
+fn shader_view(tag: Tag) -> ShaderView {
+    crate::shader::note_use();
+    ShaderView(ElNode::new(tag))
+}
+
 /// A view whose box a shader draws, under its children: give it the
 /// program with [`ShaderView::source`] and its uniforms with
 /// [`ShaderView::uniform`]. Without a program it draws nothing of its own.
 pub fn shader() -> ShaderView {
-    ShaderView(ElNode::new(Tag::Shader))
+    shader_view(Tag::Shader)
 }
 
 /// A view whose children draw through a shader: give it the program with
 /// [`ShaderView::source`], which reads what they draw with
 /// `sample_content`. Without a program the children draw as they are.
 pub fn shader_effect() -> ShaderView {
-    ShaderView(ElNode::new(Tag::ShaderEffect))
+    shader_view(Tag::ShaderEffect)
 }
 
 /// A view whose children change through a shader when its
@@ -497,20 +504,20 @@ pub fn shader_effect() -> ShaderView {
 /// drew, `sample_to` what they draw now, `nsh.progress` how far it is.
 /// Without a program it cross-fades ([`ShaderView::fallback`]).
 pub fn shader_transition() -> ShaderView {
-    ShaderView(ElNode::new(Tag::ShaderTransition))
+    shader_view(Tag::ShaderTransition)
 }
 
 /// The whole surface drawn through a shader, which reads it with
 /// `sample_content`. It takes no space and has no children.
 pub fn screen_effect() -> ShaderView {
-    ShaderView(ElNode::new(Tag::ScreenEffect))
+    shader_view(Tag::ScreenEffect)
 }
 
 /// The whole surface changing through a shader when its
 /// [`ShaderView::value`] changes, as [`shader_transition`] does for its
 /// children. It takes no space and has no children.
 pub fn screen_transition() -> ShaderView {
-    ShaderView(ElNode::new(Tag::ScreenTransition))
+    shader_view(Tag::ScreenTransition)
 }
 
 crate::static_reactive!(crate::shader::Shader: crate::shader::Shader);
@@ -806,6 +813,14 @@ impl Input {
     /// [`Self::on_paste`] hears what was pasted either way.
     pub fn paste_behavior(self, behavior: impl IntoReactive<PasteBehavior>) -> Self {
         self.bind_prop(behavior, Prop::PasteBehavior)
+    }
+
+    /// Reads pasted files of at most `bytes` bytes (`pasteMaxSize`); a
+    /// larger one reaches [`Self::on_paste`] in
+    /// [`PasteEvent::too_large`], its name, type and size only. Default:
+    /// every file is read.
+    pub fn paste_max_size(self, bytes: impl IntoReactive<u64>) -> Self {
+        self.bind_prop(bytes, |bytes: u64| Prop::PasteMaxSize(Some(bytes)))
     }
 
     /// The user pasted: the text, the files with their bytes (a
@@ -1179,6 +1194,7 @@ impl Screen {
         shader: impl IntoReactive<Option<crate::shader::TransitionShader>>,
     ) -> Self {
         self.bind_prop(shader, |s: Option<crate::shader::TransitionShader>| {
+            crate::shader::note_use();
             Prop::TransitionShader(s.map(Into::into))
         })
     }
@@ -1419,6 +1435,7 @@ impl Modal {
         shader: impl IntoReactive<Option<crate::shader::TransitionShader>>,
     ) -> Self {
         self.bind_prop(shader, |s: Option<crate::shader::TransitionShader>| {
+            crate::shader::note_use();
             Prop::TransitionShader(s.map(Into::into))
         })
     }
@@ -1600,6 +1617,18 @@ impl WebView {
         })
     }
 
+    /// One more origin the web view may show and navigate to besides
+    /// `webview.hosts`, known only while the app runs
+    /// (`scheme://host[:port]`, matched exactly): needs
+    /// `"runtimeOrigin": true` in `capabilities.webview`
+    /// ([`crate::access::WebOrigin`]). Set with the source, it applies to
+    /// it; changed later, from the next navigation.
+    pub fn allow_origin(self, origin: impl IntoReactive<String>) -> Self {
+        self.bind_prop(origin, |origin: String| {
+            Prop::Native(NativeProp::AllowOrigin(Some(origin.into())))
+        })
+    }
+
     /// Runs before each page's own scripts.
     pub fn injected_java_script_before_content(self, script: impl IntoReactive<String>) -> Self {
         self.bind_prop(script, |script: String| {
@@ -1641,6 +1670,14 @@ impl WebView {
     /// when the web view is made, so it takes a value, not a signal.
     pub fn incognito(self, incognito: bool) -> Self {
         self.set(Prop::Native(NativeProp::Incognito(incognito)))
+    }
+
+    /// Lets the person pinch to zoom the page, also past its viewport's
+    /// scale limits (default no: each platform's own behavior, see the
+    /// `zoomable` prop). Read when the web view is made, as
+    /// [`incognito`](Self::incognito).
+    pub fn zoomable(self, zoomable: bool) -> Self {
+        self.set(Prop::Native(NativeProp::Zoomable(zoomable)))
     }
 
     /// Serves the page the URLs of `scheme` (`"app-image"` for

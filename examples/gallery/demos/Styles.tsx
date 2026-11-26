@@ -367,7 +367,7 @@ function ClipPath() {
   return (
     <Card icon="styles" title="Clip path" subtitle="clipPath: inset() · transition">
       <Grid>
-        <Tile label={open() ? "Open" : "Closed"} code={open() ? "inset(0 round 16px)" : "inset(0 0 100% 100% round 16px)"} note={hint("Tap to open from the corner", "Click to open from the corner")} onPress={() => open.set(!open())}>
+        <Tile label={open() ? "Open" : "Closed"} code={open() ? "inset(0 round 16px)" : "inset(0 0 100% 100% round 16px)"} note={hint("Tap to open", "Click to open")} onPress={() => open.set(!open())}>
           <View style={{ width: 132, height: 84 }}>
             <View
               style={{
@@ -388,8 +388,8 @@ function ClipPath() {
               <View style={{ height: 6, width: 84, borderRadius: 3, backgroundColor: alpha(colors.accent, 0.35) }} />
               <View style={{ height: 6, width: 60, borderRadius: 3, backgroundColor: alpha(colors.accent, 0.2) }} />
             </View>
-            <View style={{ position: "absolute", right: 6, top: 6, width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: colors.accent }}>
-              <Text style={{ fontSize: 14, fontWeight: "700", color: "#ffffff" }}>{open() ? "×" : "+"}</Text>
+            <View style={{ position: "absolute", right: 6, top: 6, width: 22, height: 22, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: colors.accentFill }}>
+              <Text style={{ fontSize: 14, fontWeight: "700", color: colors.onAccent }}>{open() ? "×" : "+"}</Text>
             </View>
           </View>
         </Tile>
@@ -397,6 +397,41 @@ function ClipPath() {
           <View style={{ width: 132, height: 84, borderRadius: 14, borderCurve: "continuous", overflow: "hidden", backgroundColor: colors.surface }}>
             <Image src={photoUrl("day", "small")} style={{ ...fill, objectFit: "cover" }} />
             <Image testID="wipe" src={photoUrl("moon", "small")} style={{ ...fill, objectFit: "cover", clipPath: `inset(0 ${100 - wipe()}% 0 0)`, ...motion }} />
+          </View>
+        </Tile>
+      </Grid>
+    </Card>
+  );
+}
+
+/**
+ * `maskImage` transitioned by name: a fade that grows in from the bottom
+ * edge, each gradient stop moving on its own.
+ */
+function MaskFade() {
+  const faded = signal(false);
+  const mask = () =>
+    faded() ? "linear-gradient(to bottom, black 40%, transparent 100%)" : "linear-gradient(to bottom, black 100%, transparent 100%)";
+  return (
+    <Card icon="styles" title="Mask" subtitle="maskImage · transition">
+      <Grid>
+        <Tile label={faded() ? "Faded" : "Whole"} code={faded() ? "black 40%, transparent 100%" : "black 100%, transparent 100%"} note={hint("Tap to fade", "Click to fade")} onPress={() => faded.set(!faded())}>
+          <View
+            testID="fade"
+            style={{
+              width: 132,
+              height: 84,
+              borderRadius: 14,
+              borderCurve: "continuous",
+              overflow: "hidden",
+              backgroundColor: colors.surface,
+              maskImage: mask(),
+              transitionProperty: "mask-image",
+              transitionDuration: 600,
+              transitionTimingFunction: "cubic-bezier(0.32, 0.72, 0, 1)",
+            }}
+          >
+            <Image src={photoUrl("day", "small")} style={{ position: "absolute", left: 0, top: 0, right: 0, bottom: 0, objectFit: "cover" }} />
           </View>
         </Tile>
       </Grid>
@@ -637,6 +672,6 @@ export function Styles() {
   // cards its Cells hold (borders, clipping and layers, numerals, the
   // writing direction) and leaves the others out.
   const sections =
-    platform.idiom === "terminal" ? [Borders, Layers, Numerals, RightToLeft] : [Corners, ProgressiveBlur, Borders, Shadows, Layers, ClipPath, Transforms, Numerals, RightToLeft];
+    platform.idiom === "terminal" ? [Borders, Layers, Numerals, RightToLeft] : [Corners, ProgressiveBlur, Borders, Shadows, Layers, ClipPath, MaskFade, Transforms, Numerals, RightToLeft];
   return <DemoPage cards={sections} />;
 }

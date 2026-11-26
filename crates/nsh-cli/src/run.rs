@@ -61,6 +61,21 @@ impl Target {
         }
     }
 
+    /// The operating system the app runs on, as `platform.os` names it:
+    /// Mac Catalyst's is iOS, a GPUI or terminal host's this machine's.
+    pub(crate) fn os(self) -> nsh_core::platform::Os {
+        use nsh_core::platform::Os;
+        match self {
+            Target::Catalyst | Target::Ios => Os::Ios,
+            Target::Android => Os::Android,
+            Target::Linux => Os::Linux,
+            Target::Macos => Os::MacOs,
+            Target::Windows => Os::Windows,
+            Target::Web => Os::Web,
+            Target::Gpui | Target::Tui => Target::native().os(),
+        }
+    }
+
     pub(crate) fn platform(self) -> crate::runtime::Platform {
         match self {
             Target::Catalyst => crate::runtime::Platform::MacCatalyst,
@@ -165,6 +180,21 @@ impl HostWindow<'_> {
     }
 }
 
+fn validate_listen(listen: crate::dev::Listen, target: Target) -> anyhow::Result<()> {
+    if target == Target::Android
+        && !matches!(
+            listen.host,
+            std::net::Ipv4Addr::UNSPECIFIED | std::net::Ipv4Addr::LOCALHOST
+        )
+    {
+        bail!(
+            "--host {} is not supported with --target android: adb reverse forwards the device's 127.0.0.1 to this machine's 127.0.0.1, so use 127.0.0.1 or 0.0.0.0",
+            listen.host
+        );
+    }
+    Ok(())
+}
+
 /// Starts a dev session and runs the app in a development host, which
 /// loads bundles from the dev server and reloads on change.
 pub(crate) fn run(
@@ -196,6 +226,7 @@ pub(crate) fn run(
         );
     }
     window.check(target, crate::rust_app::is_root(entry))?;
+    validate_listen(listen, target)?;
     if matches!(
         target,
         Target::Macos | Target::Linux | Target::Windows | Target::Gpui
@@ -207,10 +238,9 @@ pub(crate) fn run(
         // package: a debug host measures debug code.
         crate::rust_app::set_release_hosts();
     }
-    let work = dunce::canonicalize(entry)?
-        .parent()
-        .context("entry has no directory")?
-        .join(".nsh");
+    // The app's directory: its `nsh.json`'s, which may be above the entry
+    // (`"entry"`).
+    let work = nsh_bundler::app_dir::app_dir_of(&dunce::canonicalize(entry)?).join(".nsh");
     if target == Target::Tui {
         return run_tui(
             entry,
@@ -279,11 +309,13 @@ pub(crate) fn run(
         // Run in place: unlike Catalyst's, the GTK host needs no app
         // bundle around it.
         Target::Linux => {
+            let id = crate::package::app_id(entry)?;
+            dev_desktop_entry(&id, &host);
             let mut command = Command::new(&host);
             command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
             command
                 .args(&args)
-                .args(["--app-id", &crate::package::app_id(entry)?])
+                .args(["--app-id", &id])
                 .args(window.args());
             let schemes = crate::package::read_config(entry)?.schemes;
             if !schemes.is_empty() {
@@ -377,6 +409,49 @@ fn run_web(
     session.watch(|| Ok(false))
 }
 
+/// The desktop portal (xdg-desktop-portal 1.19+) only serves an app
+/// outside a sandbox when an `<id>.desktop` entry names it: without one,
+/// global shortcuts (and the portal's other per-app services) are refused
+/// with "App info not found". A package installs its entry; a run in place
+/// gets a hidden one in `$XDG_DATA_HOME/applications`, written once and
+/// left there (`NoDisplay`, so no launcher lists it). An entry the app or
+/// the user installed is never touched.
+fn dev_desktop_entry(id: &str, exec: &Path) {
+    let Some(dir) = std::env::var_os("XDG_DATA_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+    else {
+        return;
+    };
+    if let Err(e) = write_dev_desktop_entry(&dir.join("applications"), id, exec) {
+        ui::warn(format!(
+            "could not write {id}.desktop for the desktop portal ({e}): global shortcuts may not register"
+        ));
+    }
+}
+
+const DEV_DESKTOP_MARK: &str = "X-NSH-Development=true";
+
+fn write_dev_desktop_entry(dir: &Path, id: &str, exec: &Path) -> anyhow::Result<()> {
+    let path = dir.join(format!("{id}.desktop"));
+    if let Ok(existing) = fs::read_to_string(&path)
+        && !existing.contains(DEV_DESKTOP_MARK)
+    {
+        return Ok(());
+    }
+    let entry = format!(
+        "[Desktop Entry]\nType=Application\nName={id}\nExec={}\nStartupWMClass={id}\nTerminal=false\nNoDisplay=true\n{DEV_DESKTOP_MARK}\n",
+        exec.display()
+    );
+    if fs::read_to_string(&path).ok().as_deref() == Some(entry.as_str()) {
+        return Ok(());
+    }
+    fs::create_dir_all(dir)?;
+    fs::write(&path, entry)?;
+    Ok(())
+}
+
 /// Runs a Rust app (`nsh.json` `"root"`): its own runner, with no JS
 /// runtime, mounts its root. Desktops run the debug runner in place (its
 /// output in this terminal), Catalyst in an app bundle, the iOS simulator
@@ -436,6 +511,9 @@ fn run_rust_app(
             let runner = crate::runtime::file(target.platform(), false)?;
             let dir = run.join("run/nsh");
             resources(&dir)?;
+            if target == Target::Linux {
+                dev_desktop_entry(&id, &runner);
+            }
             let mut command = Command::new(&runner);
             command.env("NSH_APP_DIR", &dir);
             if cfg!(target_os = "macos") {
@@ -514,7 +592,7 @@ fn run_rust_app(
             let step = ui::Step::start(format!("installing {id} on {serial}"));
             android::install(&sdk, &serial, &apk, &id, &["-r"], android::AppData::Kept)?;
             let activity = format!("{id}/com.longbridge.nsh.AppActivity");
-            let mut start = vec!["shell", "am", "start", "-S", "-n", activity.as_str()];
+            let mut start = android::dev_start(&activity);
             start.extend(env.iter().map(String::as_str));
             android::adb(&sdk, &serial, &start)?;
             step.done(format!("launched {id} on {serial}"));
@@ -556,6 +634,7 @@ fn package_for_run(
         run: false,
         device: None,
         asset_url: None,
+        shared_runtime: false,
         development: true,
     })
 }
@@ -817,21 +896,12 @@ fn run_android(
             target_sdk: config.target_sdk()?,
         }),
     )?;
-    // The device reaches the dev server on its own 127.0.0.1, until the
-    // run ends.
+    // The device reaches the dev server on its own 127.0.0.1 through
+    // `adb reverse`, until the run ends.
     let _reverse = android::Reverse::add(&sdk, &serial, session.port())?;
-    let url = session.local_url();
-    let mut start = vec![
-        "shell",
-        "am",
-        "start",
-        "-S",
-        "-n",
-        "com.longbridge.nsh.host/com.longbridge.nsh.DevActivity",
-        "--es",
-        "url",
-        &url,
-    ];
+    let url = session.loopback_url();
+    let mut start = android::dev_start("com.longbridge.nsh.host/com.longbridge.nsh.DevActivity");
+    start.extend(["--es", "url", &url]);
     if trace {
         start.extend(["--ez", "trace", "true"]);
     }
@@ -1062,39 +1132,7 @@ fn package_catalyst(
     )?;
     crate::apple::write_localized_info(&contents.join("Resources"), &localized)?;
     install_binary(host, &macos.join("nsh-ios-host"))?;
-    let (frameworks, changed) = dev_host_frameworks(
-        config,
-        &meta,
-        "aarch64-apple-ios-macabi",
-        &contents.join("Frameworks"),
-        &work.join("frameworks.json"),
-    )?;
-    // macOS runs signed code only, ad hoc at least: a framework that came
-    // without a signature gets one.
-    if changed {
-        crate::ios_frameworks::sign(&frameworks, "-")?;
-    }
     Ok(app)
-}
-
-/// Makes the development host's `Frameworks/` (`dir`) hold the dynamic
-/// frameworks of the app's `nsh.json` (`config`) and its crates' (`meta`)
-/// for `triple`, which the host built with the app's crates linked
-/// (`ios_frameworks`); `record` remembers the copies. A host without the
-/// app's crates (a TSX app's prebuilt one) links none.
-fn dev_host_frameworks(
-    config: &crate::package::AppConfig,
-    meta: &crate::module_meta::ModuleMeta,
-    triple: &str,
-    dir: &Path,
-    record: &Path,
-) -> anyhow::Result<(Vec<PathBuf>, bool)> {
-    let frameworks = if crate::rust_app::current().is_some() {
-        crate::module_meta::ios_link(&config.ios.frameworks, &[], meta).0
-    } else {
-        Vec::new()
-    };
-    crate::ios_frameworks::sync(&frameworks, triple, dir, Some(record))
 }
 
 /// Creates (or refreshes) `<work>/ios/NshDev.app`, a flat iOS app bundle,
@@ -1125,13 +1163,6 @@ pub(crate) fn package_ios(
     }
     let strings_changed = crate::apple::write_localized_info(&app, &localized)?;
     let installed = install_binary(host, &app.join("nsh-ios-host"))?;
-    let (frameworks, frameworks_changed) = dev_host_frameworks(
-        config,
-        &meta,
-        "aarch64-apple-ios-sim",
-        &app.join("Frameworks"),
-        &work.join("ios").join("frameworks.json"),
-    )?;
     let (extensions, extensions_changed) = dev_host_extensions(config, &app, &info)?;
     // The app's entitlements, as its simulator package has them: an app
     // group the host shares with the app's extensions, for one.
@@ -1151,15 +1182,13 @@ pub(crate) fn package_ios(
     if installed
         || info_changed
         || strings_changed
-        || frameworks_changed
         || extensions_changed
         || entitlements_changed
         || !app.join("_CodeSignature").exists()
     {
-        // The app's signature seals its extensions' and frameworks': they
+        // The app's signature seals its extensions': they
         // are signed first.
         crate::app_extensions::sign_ad_hoc(&extensions, &work.join("ios"))?;
-        crate::ios_frameworks::sign(&frameworks, "-")?;
         let mut codesign = Command::new("codesign");
         codesign.args(["--force", "--sign", "-", "--timestamp=none"]);
         if entitlements_file.exists() {
@@ -1585,13 +1614,12 @@ fn info_plist(target: Target) -> String {
              <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>"
         }
     };
-    // The host runs any app: it may recognize speech and its pages may
-    // capture media.
-    let usage = crate::package::USAGE_DESCRIPTIONS
+    // The host runs any app: its pages may capture media. What the app's
+    // crates use (`nsh-extra`'s `speech`) they declare
+    // (`with_crates_info`).
+    let usage = crate::package::WEB_MEDIA_USAGE_DESCRIPTIONS
         .iter()
-        .copied()
-        .chain([crate::package::WEB_MEDIA_USAGE_DESCRIPTIONS[1]].map(|(_, key, text)| (key, text)))
-        .map(|(key, text)| format!("<key>{key}</key><string>{text}</string>"))
+        .map(|(_, key, text)| format!("<key>{key}</key><string>{text}</string>"))
         .collect::<Vec<_>>()
         .join("\n    ");
     format!(
@@ -1616,6 +1644,34 @@ fn info_plist(target: Target) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dev_desktop_entry_never_replaces_an_installed_one() {
+        let dir = std::env::temp_dir().join(format!("nsh-dev-desktop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("com.example.a.desktop");
+        super::write_dev_desktop_entry(&dir, "com.example.a", std::path::Path::new("/x/host"))
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("NoDisplay=true") && written.contains("Exec=/x/host"));
+        // Rewritten for a new host.
+        super::write_dev_desktop_entry(&dir, "com.example.a", std::path::Path::new("/y/host"))
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("Exec=/y/host")
+        );
+        // The app's installed entry stays.
+        std::fs::write(&path, "[Desktop Entry]\nName=A\n").unwrap();
+        super::write_dev_desktop_entry(&dir, "com.example.a", std::path::Path::new("/y/host"))
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[Desktop Entry]\nName=A\n"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use clap::ValueEnum as _;
 
     use super::{
@@ -1779,6 +1835,37 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(network, [Target::Ios, Target::Android, Target::Web]);
+    }
+
+    /// The OS whose nshm a target links (`nsh.json` `"targets"`): Catalyst
+    /// runs the iOS backend, GPUI and the terminal this machine's.
+    #[test]
+    fn targets_run_on_the_os_platform_os_names() {
+        use nsh_core::platform::Os;
+        assert_eq!(Target::Catalyst.os(), Os::Ios);
+        assert_eq!(Target::Ios.os(), Os::Ios);
+        assert_eq!(Target::Web.os(), Os::Web);
+        assert_eq!(Target::Gpui.os(), Target::native().os());
+        assert_eq!(Target::Tui.os(), Target::native().os());
+    }
+
+    #[test]
+    fn android_rejects_bind_hosts_that_adb_reverse_cannot_reach() {
+        use std::net::Ipv4Addr;
+
+        let listen = |host| crate::dev::Listen { port: 8790, host };
+        assert!(super::validate_listen(listen(Ipv4Addr::UNSPECIFIED), Target::Android).is_ok());
+        assert!(super::validate_listen(listen(Ipv4Addr::LOCALHOST), Target::Android).is_ok());
+        assert!(
+            super::validate_listen(listen(Ipv4Addr::new(192, 168, 1, 20)), Target::Android)
+                .is_err()
+        );
+        assert!(
+            super::validate_listen(listen(Ipv4Addr::new(127, 0, 0, 2)), Target::Android).is_err()
+        );
+        assert!(
+            super::validate_listen(listen(Ipv4Addr::new(192, 168, 1, 20)), Target::Web).is_ok()
+        );
     }
 
     /// `--window-size` reaches every desktop host; GPUI runs no app of

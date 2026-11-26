@@ -213,6 +213,8 @@ const canIndent = editor.can(sinkListItem("listItem"));
 | `on(event, listener)` | 每次发生 `event` 后，在 JS 的下一轮以它的数据调用 `listener`：`revision`（`{ revision }`，每次修改之后，无论来自何处）、`update`、`selectionUpdate`、`transaction`、`focus`、`blur`、`delete`。返回一个停止监听的函数；在组件渲染期间添加的监听器随组件一起停止 |
 | `focus()`、`blur()` | 把键盘焦点移到显示编辑器的视图，或从中移开 |
 
+`insertContent` 收到文本、Markdown 或 JSON 时，内容会在边缘打开并适配插入位置：光标位于文本中时，一个段落会拼接进光标前后的文本；列表、表格等无法内联放入的结构仍作为块插入。HTML 字符串遵循 Tiptap 的 `insertContent`：裸文本或内联标记拼进文本，显式的块元素作为块插入。
+
 位置的计算与 ProseMirror 相同：文本按 UTF-16 码元计数，叶子节点计为一，有内容的节点计其两个边界。需要在编辑后仍然有效的东西，在节点属性或标记中保存一个 id。位置查询（`resolve(pos)`、`nodeAt(pos)`、`coordsAtPos(pos)`、`findParentNode(name, pos)` 等）在位置超出文档（`0` 到 `doc.content.size`）时抛出 `RangeError`，与 ProseMirror 的 `resolve` 相同；那里没有东西时回答 `null`（`nodeAt` 在节点末尾，`coordsAtPos` 在没有视图显示编辑器时）。`run` 和 `can` 遇到编辑器不认识的命令、节点或标记类型时抛出 `TypeError`。
 
 ### 接管事务
@@ -367,9 +369,9 @@ const paste = new RichEditorPlugin("paste")
 
 应用自己清洗剪贴板里的 HTML（Word 的列表、Google Docs 的外壳、转成 HTML 的 Markdown）时，用 `editor.pasteHTML(html)`
 把结果接着粘贴进去并返回 `true`；纯文本用 `editor.pasteText(text)`。它们就是 ProseMirror 的 `pasteHTML` 和 `pasteText`：
-内容按粘贴的方式读取，即按 schema 的规则解析并适配选区，所以标了 `isolating` 的节点（带图注的图片）会完整保留，而
-`insertContent(html, "html")` 会把它打开；编辑器自己的粘贴步骤（链接、字数限制、粘贴规则）照常生效。插件的 `transformPasted`
-和 `handlePaste` 不会再被调用。返回值表示是否粘贴了内容。
+内容按粘贴的方式读取，即按 schema 的规则解析并适配选区，所以标了 `isolating` 的节点（带图注的图片）会完整保留；
+相比之下，传给 `insertContent` 的 JSON 或 Markdown 会在内容边缘打开，即使穿过这样的节点也一样。编辑器自己的粘贴步骤
+（链接、字数限制、粘贴规则）照常生效。插件的 `transformPasted` 和 `handlePaste` 不会再被调用。返回值表示是否粘贴了内容。
 
 ```tsx
 const paste = new RichEditorPlugin("paste").handlePaste((_slice, clipboard) => {
@@ -411,7 +413,7 @@ editor.on("transaction", () => {
 editor.run(insertMention(editor.suggestion("mention")!.range, "u1", "Joan"));
 ```
 
-- `link(options?)`：在 URL 后输入空格或 Enter 时，URL 变为链接，粘贴文本中的 URL 也一样（`autolink`）；在选区上粘贴 URL 会给选区加上链接（`linkOnPaste`）；按住 Mod 点按链接，或在编辑器只读时点按，会通过应用的 URL 处理打开它（`openOnClick`）；`enableClickSelection` 点按时选中整个链接。带协议和不带协议的 URL（`nsh.dev`、`https://nsh.dev/docs`、电子邮件地址）都能识别，不带协议的主机名使用 `defaultProtocol`（`http`）。链接接受 `http`、`https`、`ftp`、`ftps`、`mailto`、`tel`、`callto`、`sms`、`cid`、`xmpp` 以及 `protocols` 中的协议，因此 `setLink({ href })`、`toggleLink(attrs?)` 和自动链接会把脚本（`javascript:`）和 data URL 挡在外面。`unsetLink()` 移除选区所在的链接。在桌面平台和桌面形态的 Web 上，指针停在带链接的文字上时，会在指针下方显示链接的 `title` 和目的地，与 [TextView 的链接](./text-view.md)相同；在链接里按压和输入照常进行。由应用的标记视图渲染的文字，显示应用元素自己的内容。
+- `link(options?)`：在 URL 后输入空格或 Enter 时，URL 变为链接，粘贴文本中的 URL 也一样（`autolink`）；在选区上粘贴 URL 会给选区加上链接（`linkOnPaste`）；按住 Mod 点按链接，或在编辑器只读时点按，会通过应用的 URL 处理打开它（`openOnClick`）；`enableClickSelection` 点按时选中整个链接。带协议和不带协议的 URL（`nsh.dev`、`https://nsh.dev/docs`、电子邮件地址）都能识别，不带协议的主机名使用 `defaultProtocol`（`http`）。链接接受 `http`、`https`、`ftp`、`ftps`、`mailto`、`tel`、`callto`、`sms`、`cid`、`xmpp` 以及 `protocols` 中的协议，因此 `setLink({ href })`、`toggleLink(attrs?)` 和自动链接会把脚本（`javascript:`）和 data URL 挡在外面。链接标记读写 HTML 时会挡掉 `javascript:`、`vbscript:` 和 `data:` URL（不论大小写，协议名中夹有空白或控制字符也一样）：这样的 `<a>` 读入为普通文字，这样的 `href` 也不会写出。其他 URL，包括应用自己的协议，照原样读入和写出。`unsetLink()` 移除选区所在的链接。在桌面平台和桌面形态的 Web 上，指针停在带链接的文字上时，会在指针下方显示链接的 `title` 和目的地，与 [TextView 的链接](./text-view.md)相同；在链接里按压和输入照常进行。由应用的标记视图渲染的文字，显示应用元素自己的内容。
 - `characterCount(options?)`：`editor.characters(mode?)` 统计文本的字符（`"textSize"`，与 JS 的 `length` 一样按 UTF-16 单元）或文档的位置数（`"nodeSize"`）；`editor.words()` 统计词数（Unicode 词边界）。设置 `limit` 后，会超出上限的修改被拒绝，粘贴的内容被截到放得下的长度；超出上限的初始文档会被截短（`autoTrim`）。`setCharacterLimit(limit)` 修改上限，`editor.characterLimit` 读取上限。
 - `suggestion(options?)`：跟踪光标前输入的触发字符（`char`，默认 `@`）。`allowSpaces` 让查询可以包含空格，`allowedPrefixes` 列出触发字符前可以出现的字符（默认一个空格；`anyPrefix` 接受任何字符），`startOfLine` 要求触发字符位于行首（`/` 命令菜单）。`editor.suggestion(key)` 给出 `{ active, range, query, text, lastKey, keyCount, open }`；活动范围带有应用的 `decorationClass`（查询为空时还有 `decorationEmptyClass`）。建议活动期间，`captureKeys` 中的按键归应用的列表：编辑器接收它们并把最后一个记录在状态中；Escape 关闭建议（`exitSuggestion(key)` 也可以）。`setSuggestionOpen(open, key?)` 告诉建议当前查询下列表是否显示（即状态中的 `open`）：关闭时，`captureKeys` 中的按键交给编辑器继续处理，没有匹配时 Enter 照常发送或换行，Escape 仍然关闭建议。它只对设置时的查询有效，查询每次变化都要重新设置；在此之前列表视为打开，按键归列表。异步加载条目的列表（例如远程搜索联系人）要等确定列表为空后再关闭，结果还在加载时不要关闭，否则 Enter 会在结果到达之前就生效。在 `plugins` 中，建议要放在 `starterKit()` 和应用自己的按键之前，按键才会先到达它。`replaceSuggestion(content, key?)` 用文本或 JSON 内容替换触发字符和查询。
 - `withMention(schema, { name?, char? })` 添加 Tiptap 的提及节点：带 `id`、`label` 和触发字符的行内原子节点，在文本中写作 `@label`，在 HTML 中写作 `<span data-type="mention">`。`insertMention(range, id, label?)` 用一个提及和一个空格替换建议的范围。
@@ -467,7 +469,7 @@ editor.run(addRowAfter());
 
 Tab 与 Shift-Tab 在单元格之间移动，在最后一个单元格按 Tab 会添加一行。在单元格边缘按方向键会进入相邻单元格；Shift 加方向键，或跨单元格拖动，会选中一个矩形区域的单元格（类型为 `"cell"` 的选区，其 `anchor` 与 `head` 是首尾单元格之前的位置）。Backspace 与 Delete 清空选中的单元格，选中全部单元格时删除整个表格。
 
-在编辑器中，表格是由其单元格组成的网格：每列与其单元格的 `colwidth` 一样宽，没有宽度的列分享剩余空间（至少 `cellMinWidth` 宽），每行至少为其 `height` 高。默认外观来自主题：1 点 `border` 网格线，表头单元格使用 `muted` 背景，单元格带内边距，选中的单元格覆盖一层 `selectedCell` 部件，使用选区颜色。`classes.nodes`（`table`、`tableCell`、`tableHeader`）和这些部件可以重新设置全部外观。在单元格的第一行或最后一行按上下方向键，会进入上方或下方的单元格。
+列宽随单元格中的文字和组件调整。长段落会换行，表格超出编辑器宽度时可以在表格内左右滚动。拖动或保存的列宽优先，每列至少为 `cellMinWidth` 宽，每行至少为保存的 `height` 高。默认外观来自主题：1 点 `border` 网格线，表头单元格使用 `muted` 背景，单元格带内边距，选中的单元格覆盖一层 `selectedCell` 部件，使用选区颜色。`classes.nodes`（`table`、`tableCell`、`tableHeader`）和这些部件可以重新设置全部外观。在单元格的第一行或最后一行按上下方向键，会进入上方或下方的单元格。
 
 文档可编辑时：
 

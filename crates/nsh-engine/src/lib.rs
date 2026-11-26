@@ -16,6 +16,9 @@ mod access;
 mod app_directory;
 mod cache;
 mod error;
+// Where shader frames go: read back, or on surfaces the backend shows.
+#[cfg(feature = "shader")]
+mod frames;
 mod host_channel;
 mod local_storage;
 #[cfg(not(target_arch = "wasm32"))]
@@ -75,6 +78,9 @@ pub use nsh_core::{
 };
 #[cfg(feature = "js-core")]
 pub use nsh_js::BYTECODE_VERSION;
+#[cfg(feature = "js-core")]
+#[doc(hidden)]
+pub use nsh_js::with_inline_root;
 /// Signed packages, release-key certificates, revocations and trust stores.
 #[cfg(feature = "js-core")]
 pub use nsh_package as package;
@@ -756,6 +762,23 @@ pub trait MountSink: Send + 'static {
     /// Called once per commit, in order.
     fn submit(&self, batch: MountBatch);
 
+    /// Include the settled logical in-flow content height with mount batches.
+    fn needs_content_height(&self) -> bool {
+        false
+    }
+
+    /// Called instead of [`Self::submit`] when [`Self::needs_content_height`]
+    /// is true. Apply the settled height ([`Core::content_height`]) together
+    /// with the batch before notifying host observers. A height change can
+    /// arrive with an empty batch when there are no mount items to apply.
+    ///
+    /// By default, forwards nonempty batches to [`Self::submit`].
+    fn submit_with_content_height(&self, batch: MountBatch, _content_height: Option<Points>) {
+        if !batch.items.is_empty() {
+            self.submit(batch);
+        }
+    }
+
     /// Include logical tree order when the mounted structure changes. Native
     /// `Insert` items alone describe stacking order, which can differ by `zIndex`.
     fn needs_tree_order(&self) -> bool {
@@ -808,6 +831,14 @@ pub trait MountSink: Send + 'static {
     /// latest size. A platform that waits for the layout at a new size, to
     /// show it in the frame the window takes the size, stops waiting here.
     fn resized(&self, _size: Size<Points>) {}
+
+    /// The engine laid root `id` out at `size`
+    /// ([`EngineControl::set_root_size`]: a window of the app's own, a
+    /// modal): called as [`MountSink::resized`] is, after the commit of the
+    /// turn that applied the size, once per turn and root, with its latest
+    /// size. A platform that waits for the layout of a window at its new
+    /// size stops waiting here.
+    fn root_resized(&self, _id: NodeId, _size: Size<Points>) {}
 
     /// The engine has handled the first `events` events sent with
     /// [`EngineControl::dispatch_event`]. Called after the commit of the
@@ -963,7 +994,19 @@ impl nsh_core::runtime::UpdaterHost for UpdaterOverNetwork {
             let mut total: Option<u64> = None;
 
             let outcome = loop {
-                match rx.recv() {
+                // Platform stacks only time out connecting and waiting for
+                // headers; a body that stops arriving would hang forever.
+                let event = match rx.recv_timeout(UPDATER_STALL_TIMEOUT) {
+                    Ok(event) => Ok(event),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        break Err(format!(
+                            "download stalled (no data for {}s)",
+                            UPDATER_STALL_TIMEOUT.as_secs()
+                        ));
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(()),
+                };
+                match event {
                     Ok(FetchEvent::Head(head)) => {
                         if matches!(head.status, 301 | 302 | 303 | 307 | 308)
                             && let Some(location) = updater_header(&head.headers, "location")
@@ -1046,6 +1089,14 @@ impl nsh_core::runtime::UpdaterHost for UpdaterOverNetwork {
         Err("too many redirects".to_owned())
     }
 }
+
+/// How long an update download may go without any network event before
+/// it fails as stalled (and is retried from the bytes already on disk).
+const UPDATER_STALL_TIMEOUT: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(200)
+} else {
+    std::time::Duration::from_secs(60)
+};
 
 /// First value of header `target` (ASCII case-insensitive).
 fn updater_header<'a>(headers: &'a [(String, String)], target: &str) -> Option<&'a str> {
@@ -1235,11 +1286,6 @@ pub struct EngineConfig {
     /// platform's picker: the embedding app's own picker, or a test's
     /// files; `None`: the platform's.
     pub picker: Option<Arc<dyn nsh_core::picker::PickerBackend>>,
-    /// Recognizes the app's speech (`Speech.start`) instead of the
-    /// platform's recognizer: the embedding app's own, or a test's fake
-    /// (`nsh_testing`'s). `None` (the default): the platform's, where it
-    /// has one (`Environment::speech`).
-    pub speech: Option<Arc<dyn nsh_core::speech::SpeechBackend>>,
     /// Plays the app's sound (`Sound`, `AudioPlayer`) instead of the
     /// platform: the embedding app's own audio stack, or a test's fake
     /// (`nsh_testing`'s). `None` (the default): the platform's, where it
@@ -1390,7 +1436,6 @@ impl EngineConfig {
             clipboard: None,
             host: HostChannel::default(),
             picker: None,
-            speech: None,
             audio: None,
             windows: None,
             login_item: None,
@@ -1476,7 +1521,6 @@ impl std::fmt::Debug for EngineConfig {
             .field("clipboard", &self.clipboard.is_some())
             .field("host", &self.host)
             .field("picker", &self.picker.is_some())
-            .field("speech", &self.speech.is_some())
             .field("audio", &self.audio.is_some())
             .field("login_item", &self.login_item.is_some())
             .field("windows", &self.windows.is_some())
@@ -1728,8 +1772,9 @@ impl EngineControl {
         let _ = self.tx.send(Message::Displays(displays.into()));
     }
 
-    /// The platform presents root `id` (a modal) at `size`, with `insets`
-    /// of it covered by system UI.
+    /// The platform presents root `id` (a modal, a window of the app's
+    /// own) at `size`, with `insets` of it covered by system UI. Reported
+    /// back after its layout ([`MountSink::root_resized`]).
     pub fn set_root_size(&self, id: NodeId, size: Size<Points>, insets: EdgeInsets) {
         let _ = self.tx.send(Message::RootSize(id, size, insets));
     }
@@ -2419,16 +2464,19 @@ impl<M: TextEngine + 'static> Driver<M> {
         let text_engine = Rc::new(text_engine);
         let access = Arc::new(app_access(&config.app));
         let mut core = Core::new(text_engine.clone(), config.viewport);
-        // nsh.json's `application.quitMode`, else the default
-        // `"platform"`: Windows and Linux quit when the last window
-        // closes; macOS stays in the Dock. The app can change it at run
-        // time with `Application.setQuitMode`.
-        let mode = config
+        // Explicit `<Window>` scenes default to `"platform"` (Windows and
+        // Linux quit when the last window closes; macOS stays in the Dock),
+        // while a plain root's implicit main window quits on close unless the
+        // app explicitly sets `application.quitMode` or calls
+        // `Application.setQuitMode`.
+        core.__set_default_quit_mode(nsh_core::desktop::QuitMode::Platform);
+        if let Some(mode) = config
             .app
             .application()
-            .map(|options| options.quit_mode)
-            .unwrap_or_default();
-        core.set_quit_mode(mode);
+            .and_then(|options| options.__explicit_quit_mode())
+        {
+            core.set_quit_mode(mode);
+        }
         core.set_content_culling(config.content_culling);
         core.set_tree_order_tracking(sink.needs_tree_order());
         core.set_projected_state_mounting(sink.needs_projected_states());
@@ -2483,7 +2531,6 @@ impl<M: TextEngine + 'static> Driver<M> {
         });
         core.set_clipboard(config.clipboard.clone());
         core.set_picker(config.picker.clone());
-        core.set_speech(config.speech.clone());
         core.set_app_links(config.app.links().clone());
         core.set_app_info(config.app.app_info().cloned());
         // Every VM reads the core's address where it is (`UrlScheme.url()`).
@@ -2530,11 +2577,15 @@ impl<M: TextEngine + 'static> Driver<M> {
                 }
             }
         }
-        // The fonts the UI sets' crates ship, before anything is measured.
+        // The fonts the UI sets' crates ship for this target, before
+        // anything is measured.
+        let os = config.environment.os;
         let fonts = config
             .ui_sets
             .iter()
-            .flat_map(nsh_core::element::Registry::asset_files)
+            .flat_map(nsh_core::element::Registry::scoped_asset_files)
+            .filter(|(targets, _)| targets.is_empty() || targets.contains(&os))
+            .map(|(_, file)| file)
             .filter(|file| file.kind == nsh_core::element::AssetKind::Font);
         for font in fonts {
             let result = match config.assets.as_deref() {
@@ -2591,6 +2642,7 @@ impl<M: TextEngine + 'static> Driver<M> {
         let js_tokens = core.tokens().clone();
         let state = State {
             core,
+            published_content_height: None,
             js_tokens,
             frame_requested: false,
             frame_turn: false,
@@ -2611,6 +2663,7 @@ impl<M: TextEngine + 'static> Driver<M> {
             key_path: Vec::new(),
             sets_seen: FxHashMap::default(),
             resized: None,
+            roots_resized: Vec::new(),
             resize_burst_ends: None,
             window_state: WindowStateReport {
                 shown: config.environment.window_state,
@@ -2744,15 +2797,13 @@ impl<M: TextEngine + 'static> Driver<M> {
         if script.is_some() {
             state.core.mount_opened_windows();
         }
-        if let Some(batch) = state.commit(script) {
-            if state.trace {
-                log::info!(
-                    target: "nsh::perf",
-                    "first frame: eval {eval_us}µs, total {}µs",
-                    start.elapsed().as_micros()
-                );
-            }
-            sink.submit(batch);
+        let batch = state.commit(script);
+        if state.submit_mount(&**sink, batch) && state.trace {
+            log::info!(
+                target: "nsh::perf",
+                "first frame: eval {eval_us}µs, total {}µs",
+                start.elapsed().as_micros()
+            );
         }
         state.run_on_main_thread(&**sink);
         if let Some(trial) = trial {
@@ -2763,6 +2814,9 @@ impl<M: TextEngine + 'static> Driver<M> {
         // layout at that size waits until something else wakes the engine.
         if let Some(size) = state.resized.take() {
             sink.resized(size);
+        }
+        for (id, size) in state.roots_resized.drain(..) {
+            sink.root_resized(id, size);
         }
         state.report_handled(&**sink);
         state.net.pump(script, &mut state.core);
@@ -2812,9 +2866,8 @@ impl<M: TextEngine + 'static> Driver<M> {
         if let Some(script) = &self.script {
             script.set_perf_stats(Some(&stats));
         }
-        if let Some(batch) = self.state.commit(self.script.as_ref()) {
-            self.sink.submit(batch);
-        }
+        let batch = self.state.commit(self.script.as_ref());
+        self.state.submit_mount(&*self.sink, batch);
         self.state.run_on_main_thread(&*self.sink);
     }
 
@@ -2944,11 +2997,13 @@ impl<M: TextEngine + 'static> Driver<M> {
 
     /// Whether nothing is left to run: no message queued, nothing due at
     /// the clock's time (a timer that keeps scheduling another at once
-    /// outlasts a flush's rounds) and no request in flight.
+    /// outlasts a flush's rounds), no request in flight and no `async fn`
+    /// call into Rust waiting for its answer.
     fn idle(&self, rx: &Receiver<Message>) -> bool {
         let now = self.clock.now();
         rx.is_empty()
             && self.state.net.idle()
+            && !self.state.core.async_calls_pending()
             && [self.due(), self.clock.next_alarm()]
                 .into_iter()
                 .flatten()
@@ -3033,20 +3088,23 @@ impl<M: TextEngine + 'static> Driver<M> {
         let tasks = turn_start.map(|s| s.elapsed());
         state.load_fonts(script, assets.as_deref(), &**sink);
         let batch = state.commit(script);
-        if let Some(batch) = batch.filter(|_| !self.quitting) {
-            sink.submit(batch);
-            if let (Some(start), Some(tasks)) = (turn_start, tasks) {
-                log::info!(
-                    target: "nsh::perf",
-                    "turn: {}µs (timers and tasks {}µs)",
-                    start.elapsed().as_micros(),
-                    tasks.as_micros(),
-                );
-            }
+        if !self.quitting
+            && state.submit_mount(&**sink, batch)
+            && let (Some(start), Some(tasks)) = (turn_start, tasks)
+        {
+            log::info!(
+                target: "nsh::perf",
+                "turn: {}µs (timers and tasks {}µs)",
+                start.elapsed().as_micros(),
+                tasks.as_micros(),
+            );
         }
         state.run_on_main_thread(&**sink);
         if let Some(size) = state.resized.take() {
             sink.resized(size);
+        }
+        for (id, size) in state.roots_resized.drain(..) {
+            sink.root_resized(id, size);
         }
         state.report_handled(&**sink);
         state.net.pump(script, &mut state.core);
@@ -3138,9 +3196,8 @@ impl<M: TextEngine + 'static> Driver<M> {
             }
             self.last_gc = Instant::now();
             self.state.committed_since_gc = false;
-            if let Some(batch) = self.state.commit(Some(script)) {
-                self.sink.submit(batch);
-            }
+            let batch = self.state.commit(Some(script));
+            self.state.submit_mount(&*self.sink, batch);
             self.state.run_on_main_thread(&*self.sink);
         }
     }
@@ -3171,6 +3228,7 @@ struct ScrollEvent {
 
 struct State<M: TextEngine> {
     core: Core<M>,
+    published_content_height: Option<Points>,
     /// The design tokens JS has (`token()`): the core's when they were
     /// last sent.
     js_tokens: Arc<nsh_core::element::Tokens>,
@@ -3237,6 +3295,9 @@ struct State<M: TextEngine> {
     sets_seen: FxHashMap<(u8, NodeId, u32), usize>,
     /// The viewport size a resize set this turn ([`MountSink::resized`]).
     resized: Option<Size<Points>>,
+    /// The roots [`EngineControl::set_root_size`] sized this turn, each
+    /// with its latest size ([`MountSink::root_resized`]).
+    roots_resized: Vec<(NodeId, Size<Points>)>,
     /// A resize before this time continues a burst of them
     /// ([`RESIZE_BURST_GAP`]).
     resize_burst_ends: Option<Instant>,
@@ -4047,6 +4108,22 @@ impl<M: TextEngine> State<M> {
         }
         merged
     }
+
+    /// Publishes the settled turn, even when only its content height changed.
+    fn submit_mount(&mut self, sink: &dyn MountSink, batch: Option<MountBatch>) -> bool {
+        if sink.needs_content_height() {
+            let height = self.core.content_height();
+            if batch.is_some() || height != self.published_content_height {
+                sink.submit_with_content_height(batch.unwrap_or_default(), height);
+                self.published_content_height = height;
+                return true;
+            }
+        } else if let Some(batch) = batch {
+            sink.submit(batch);
+            return true;
+        }
+        false
+    }
 }
 
 fn insets(env: &Environment) -> EdgeInsets {
@@ -4060,6 +4137,7 @@ fn ui_environment(env: &Environment, window: Size<Points>) -> nsh_core::element:
         horizontal_size_class: env.horizontal_size_class,
         vertical_size_class: env.vertical_size_class,
         safe_area: insets(env),
+        reserved_regions: env.reserved_regions,
         title_bar: env.title_bar,
         window_state: env.window_state,
         keyboard_height: env.keyboard_height,
@@ -4091,7 +4169,6 @@ fn ui_environment(env: &Environment, window: Size<Points>) -> nsh_core::element:
         auth_session: env.auth_session,
         scheme_links: env.scheme_links(),
         file_requests: env.file_requests,
-        speech: env.speech,
         notifications: env.notifications,
         audio: env.audio,
         tab_bar: env.tab_bar,
@@ -4304,6 +4381,7 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             }
             if event == EventKind::Paste {
                 payload = payload.into_paste();
+                state.core.limit_paste(id, &mut payload);
             }
             // A secondary click goes down as a press does: the overlays it
             // is outside of hear `onPressOutside` first, then the view its
@@ -4432,7 +4510,13 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
                 script.set_displays(&displays);
             }
         }
-        Message::RootSize(id, size, insets) => state.core.set_root_size(id, size, insets),
+        Message::RootSize(id, size, insets) => {
+            state.core.set_root_size(id, size, insets);
+            match state.roots_resized.iter_mut().find(|(i, _)| *i == id) {
+                Some((_, latest)) => *latest = size,
+                None => state.roots_resized.push((id, size)),
+            }
+        }
         Message::OverlayArea(area) => state.core.set_overlay_area(area),
         Message::PressBeyondRoot(page) => {
             let pressed = state.core.presses_beyond_root(page);
@@ -5106,6 +5190,39 @@ mod updater_range_tests {
             events.push("unsatisfiable".into());
         }
         Ok((events, body))
+    }
+
+    #[test]
+    fn updater_over_network_fails_a_stalled_body() {
+        /// Sends headers and a first piece, then keeps the stream open silently.
+        struct Silent(Mutex<Vec<FetchEvents>>);
+        impl Network for Silent {
+            fn fetch(&self, _: HttpRequest, mut events: FetchEvents) -> Box<dyn FetchTask> {
+                events(FetchEvent::Head(HttpHead {
+                    status: 200,
+                    headers: vec![("Content-Length".into(), "10".into())],
+                    ..Default::default()
+                }));
+                events(FetchEvent::Data(b"0123".to_vec()));
+                self.0.lock().unwrap().push(events);
+                Box::new(NoopTask)
+            }
+        }
+        let host = UpdaterOverNetwork {
+            network: Arc::new(Silent(Mutex::new(Vec::new()))),
+            assets: None,
+            config: None,
+            running: None,
+        };
+        let mut body = Vec::new();
+        let err = host
+            .get("https://x.dev/a.tar.gz", 0, &mut |_, bytes, _| {
+                body.extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(err.starts_with("download stalled"), "{err}");
+        assert_eq!(body, b"0123");
     }
 
     #[test]
